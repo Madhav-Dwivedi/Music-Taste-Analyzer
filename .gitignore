@@ -1,0 +1,55 @@
+# Environment & Python Caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Local AI Models & Weight Binaries (Downloaded on First Run)
+03_Agentic_Engine/mistral_ov_model/
+03_Agentic_Engine/models/
+02_Vector_Core/embed_ov_model/
+*.bin
+*.xml
+*.onnx
+*.safetensors
+*.pth
+*.pt
+
+# Local Credentials, Preferences & Tokens (Private)
+.env
+.env.*
+!.env.example
+.spotify_client_id
+.cache
+.cache/
+01_Data_Extractor/.cache
+01_Data_Extractor/.reccobeats_cache.json
+ytm_browser.json
+ytm_oauth.json
+.ytm_oauth_client.json
+user_preferences.json
+user_feedback.json
+web_ui/vendor/
+
+# Local User Data Outputs & Private Extended History
+extended_history/
+01_Data_Extractor/extended_history_stats.json
+01_Data_Extractor/user_music_profile.json
+01_Data_Extractor/ytmusic_profile.json
+02_Vector_Core/taste_vectors.npz
+02_Vector_Core/track_metadata.json
+02_Vector_Core/taste_profile_summary.json
+02_Vector_Core/taste_map_data.json
+03_Agentic_Engine/last_generated_playlist.json
+03_Agentic_Engine/playlist_history/
+taste_map.html
+logs/
+
+# IDE Files
+.vscode/
+.idea/

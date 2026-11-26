@@ -1,0 +1,14 @@
+requests
+spotipy>=2.26.0
+ytmusicapi>=1.9.0
+python-dotenv
+scikit-learn
+numpy
+optimum[openvino,nncf]
+torch
+transformers
+openvino-genai
+huggingface-hub
+hf_xet
+psutil
+plotly
