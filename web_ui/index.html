@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Music Taste Analyzer — Local Music Intelligence & Playlist Studio</title>
+    <title>Music Taste Analyzer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
     <script>
         (function () {
@@ -24,36 +27,65 @@
 <body>
     <header class="topbar">
         <div class="brand">
-            <span class="brand-dot"></span>
+            <span class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+                    <line x1="4" y1="14" x2="4" y2="10" />
+                    <line x1="8" y1="18" x2="8" y2="6" />
+                    <line x1="12" y1="20" x2="12" y2="4" />
+                    <line x1="16" y1="16" x2="16" y2="8" />
+                    <line x1="20" y1="13" x2="20" y2="11" />
+                </svg>
+            </span>
             <div>
                 <div class="brand-title">Music Taste Analyzer Studio</div>
-                <div class="brand-sub">Local AI Vector Engine &amp; Unified Spotify + YouTube Music Discovery</div>
+                <div class="brand-sub">Local acoustic vector engine and playlist studio</div>
             </div>
         </div>
         <div class="topbar-pills">
-            <select id="activeProviderSelect" class="provider-select" title="Active Music Provider Mode">
+            <select id="activeProviderSelect" class="provider-select" title="Active music provider">
                 <option value="spotify">Spotify</option>
                 <option value="ytmusic">YouTube Music</option>
                 <option value="unified">Unified (Spotify + YTM)</option>
             </select>
-            <div class="pill" id="hwPill" title="Hardware Telemetry">Silicon: Detecting...</div>
-            <div class="pill" id="warmPill" title="Stage 3 Model Memory">Engine: Cold</div>
-            <div class="pill pill-guard" id="guardPill" title="Active Session Taste Guardrails">Guardrails: 0 active</div>
+            <div class="pill" id="hwPill" title="Hardware telemetry">Silicon: Detecting</div>
+            <div class="pill" id="warmPill" title="Stage 3 model memory">Engine: Cold</div>
+            <div class="pill pill-guard" id="guardPill" title="Active session guardrails">Guardrails: 0 active</div>
             <button class="btn btn-sm" id="toggleConsoleBtn" type="button">
                 <span class="job-dot" id="jobDot"></span>
-                <span id="jobPillText">Job Console (Idle)</span>
+                <span id="jobPillText">Console (Idle)</span>
             </button>
         </div>
     </header>
 
     <div class="app-shell">
         <nav class="sidebar" aria-label="Primary Navigation">
-            <button class="nav-btn active" data-tab="dashboard" type="button">📊 Dashboard &amp; Sync</button>
-            <button class="nav-btn" data-tab="studio" type="button">🎧 Playlist Studio</button>
-            <button class="nav-btn" data-tab="map" type="button">🌌 Taste Map (2D/3D)</button>
-            <button class="nav-btn" data-tab="analytics" type="button">🕰️ History &amp; Archive</button>
-            <button class="nav-btn" data-tab="preferences" type="button">🎛️ Preferences</button>
-            <button class="nav-btn" data-tab="doctor" type="button">🩺 System Doctor</button>
+            <div class="nav-section-label">Workspace</div>
+            <button class="nav-btn active" data-tab="dashboard" type="button">
+                <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                <span>Dashboard &amp; Sync</span>
+            </button>
+            <button class="nav-btn" data-tab="studio" type="button">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                <span>Playlist Studio</span>
+            </button>
+            <button class="nav-btn" data-tab="map" type="button">
+                <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="3" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="21"/><line x1="3" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="21" y2="12"/></svg>
+                <span>Taste Map</span>
+            </button>
+            <button class="nav-btn" data-tab="analytics" type="button">
+                <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg>
+                <span>History &amp; Archive</span>
+            </button>
+
+            <div class="nav-section-label">System</div>
+            <button class="nav-btn" data-tab="preferences" type="button">
+                <svg class="icon" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="2" y1="14" x2="6" y2="14"/><line x1="10" y1="8" x2="14" y2="8"/><line x1="18" y1="16" x2="22" y2="16"/></svg>
+                <span>Preferences</span>
+            </button>
+            <button class="nav-btn" data-tab="doctor" type="button">
+                <svg class="icon" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                <span>System Doctor</span>
+            </button>
         </nav>
 
         <main class="content-area">
@@ -63,11 +95,14 @@
             <section class="tab-panel active" id="tab-dashboard">
                 <div class="panel-header">
                     <div>
-                        <h1>Pipeline Dashboard &amp; Taste Guardrails</h1>
-                        <p>Sync your Spotify library, vectorize tracks incrementally, and shape your active taste profile.</p>
+                        <h1>Pipeline Dashboard</h1>
+                        <p>Sync your library, vectorize tracks incrementally, and configure active taste guardrails</p>
                     </div>
                     <div class="header-actions">
-                        <button class="btn btn-primary" id="btnFullSync" type="button">⚡ Full Sync (1 → 2 → Map)</button>
+                        <button class="btn btn-primary" id="btnFullSync" type="button">
+                            <svg class="icon" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                            <span>Full sync (1 → 2 → Map)</span>
+                        </button>
                     </div>
                 </div>
 
@@ -75,82 +110,81 @@
 
                 <div class="two-col">
                     <div class="card">
-                        <h2>Pipeline Actions</h2>
-                        <p class="muted">Run individual pipeline stages or refresh stale artifacts.</p>
+                        <h2>Pipeline stages</h2>
+                        <p class="muted">Run individual stages or refresh stale artifacts</p>
                         <div class="action-grid">
-                            <button class="btn" id="btnRunStage1" type="button">1. Sync Spotify Library</button>
+                            <button class="btn" id="btnRunStage1" type="button">1. Sync Spotify</button>
                             <button class="btn" id="btnRunStage1Ytm" type="button">1b. Sync YouTube Music</button>
-                            <button class="btn" id="btnRunStage2" type="button">2. Rebuild Vectors &amp; Clusters</button>
-                            <button class="btn" id="btnRunMap" type="button">3. Rebuild 2D/3D Taste Map</button>
-                            <button class="btn" id="btnRunHistory" type="button">4. Import Extended History</button>
+                            <button class="btn" id="btnRunStage2" type="button">2. Rebuild vectors</button>
+                            <button class="btn" id="btnRunMap" type="button">3. Rebuild taste map</button>
+                            <button class="btn" id="btnRunHistory" type="button">4. Import history</button>
                         </div>
-                        <div class="era-row mt-12">
+                        <div class="era-row mt-16">
                             <div class="field-group">
-                                <label for="dashEraStart">Era Filter Start Year (optional)</label>
-                                <input id="dashEraStart" type="number" min="2006" max="2035" placeholder="e.g. 2022" />
+                                <label for="dashEraStart">Era filter start year</label>
+                                <input id="dashEraStart" type="number" min="2006" max="2035" placeholder="2022" />
                             </div>
                             <div class="field-group">
-                                <label for="dashEraEnd">Era Filter End Year (optional)</label>
-                                <input id="dashEraEnd" type="number" min="2006" max="2035" placeholder="e.g. 2026" />
+                                <label for="dashEraEnd">Era filter end year</label>
+                                <input id="dashEraEnd" type="number" min="2006" max="2035" placeholder="2026" />
                             </div>
                         </div>
                         <label class="checkbox-row mt-12">
                             <input type="checkbox" id="chkForceReembed" />
-                            <span>Force full re-embedding on Stage 2 (bypass incremental hash cache)</span>
+                            <span>Force full re-embedding on Stage 2 (bypass incremental cache)</span>
                         </label>
                         <div class="divider"></div>
                         <div class="danger-row">
-                            <span class="muted">Clear generated JSONs, OAuth tokens, and cached vectors (preserves Extended History).</span>
-                            <button class="btn btn-danger btn-sm" id="btnCleanSystem" type="button">🧹 Clean System Caches</button>
+                            <span class="muted">Clear generated JSONs, tokens, and cached vectors (keeps Extended History)</span>
+                            <button class="btn btn-danger btn-sm" id="btnCleanSystem" type="button">Clean caches</button>
                         </div>
                     </div>
 
                     <div class="card">
-                        <h2>Session Taste Guardrails &amp; Presets</h2>
-                        <p class="muted">
-                            Exclude specific artists or genres while developing your taste clusters (Stage 2) and generating playlists (Stage 3).
-                        </p>
+                        <h2>Session guardrails &amp; presets</h2>
+                        <p class="muted">Exclude artists or genres from clustering (Stage 2) and generation (Stage 3)</p>
 
-                        <div class="field-group mt-12">
-                            <label>Named Session Presets (Modes)</label>
+                        <div class="field-group mt-16">
+                            <label>Saved modes</label>
                             <div class="preset-row" id="presetsChips"></div>
                             <div class="chip-input-row mt-8">
-                                <input id="presetNameInput" type="text" placeholder="Save current settings/guardrails as Mode..." />
-                                <button class="btn btn-sm" id="btnSavePreset" type="button">Save Mode</button>
+                                <input id="presetNameInput" type="text" placeholder="Mode name" />
+                                <button class="btn btn-sm" id="btnSavePreset" type="button">Save mode</button>
                             </div>
                         </div>
 
                         <div class="field-group mt-12">
-                            <label for="dashAvoidArtistInput">Avoid Artists (Session)</label>
+                            <label for="dashAvoidArtistInput">Avoid artists</label>
                             <div class="chip-input-row">
-                                <input id="dashAvoidArtistInput" type="text" placeholder="Type artist name (e.g. Drake) and press Add" />
+                                <input id="dashAvoidArtistInput" type="text" placeholder="Artist name" />
                                 <button class="btn btn-sm" id="btnAddAvoidArtist" type="button">Add</button>
                             </div>
                             <div class="chips-wrap" id="dashAvoidArtistChips"></div>
                         </div>
 
                         <div class="field-group mt-12">
-                            <label for="dashAvoidGenreInput">Avoid Genres (Session)</label>
+                            <label for="dashAvoidGenreInput">Avoid genres</label>
                             <div class="chip-input-row">
-                                <input id="dashAvoidGenreInput" type="text" placeholder="Type genre (e.g. country, metal) and press Add" />
+                                <input id="dashAvoidGenreInput" type="text" placeholder="Genre name" />
                                 <button class="btn btn-sm" id="btnAddAvoidGenre" type="button">Add</button>
                             </div>
                             <div class="chips-wrap" id="dashAvoidGenreChips"></div>
                         </div>
 
-                        <div class="btn-row mt-12">
-                            <button class="btn btn-primary btn-sm" id="btnApplySessionGuardrails" type="button">Apply Guardrails to Session</button>
-                            <button class="btn btn-sm" id="btnSaveGuardrailsPrefs" type="button">Save as Defaults</button>
-                            <button class="btn btn-sm" id="btnRebuildWithGuardrails" type="button">Rebuild Taste Clusters Now</button>
+                        <div class="btn-row mt-16">
+                            <button class="btn btn-primary btn-sm" id="btnApplySessionGuardrails" type="button">Apply to session</button>
+                            <button class="btn btn-sm" id="btnSaveGuardrailsPrefs" type="button">Save as defaults</button>
+                            <button class="btn btn-sm" id="btnRebuildWithGuardrails" type="button">Rebuild clusters</button>
                         </div>
                     </div>
                 </div>
 
                 <div class="card mt-16">
-                    <h2>Upload Spotify or YouTube Music History (<code>.zip</code> or <code>.json</code>)</h2>
-                    <p class="muted">Drag &amp; drop your Spotify data export ZIP, <code>Streaming_History_Audio_*.json</code>, or Google Takeout YouTube Music <code>watch-history.json</code> into <code>extended_history/</code>.</p>
+                    <h2>Import listening history (<code>.zip</code> or <code>.json</code>)</h2>
+                    <p class="muted">Drop a Spotify Extended History export or Google Takeout <code>watch-history.json</code> into <code>extended_history/</code></p>
                     <div id="historyDropzone" class="dropzone mt-12" tabindex="0">
-                        <div>📦 Drag &amp; drop Extended History <code>.zip</code> / <code>.json</code> files here, or click to browse</div>
+                        <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        <span>Drop <code>.zip</code> or <code>.json</code> history files here, or click to browse</span>
                         <input id="historyFileInput" type="file" accept=".zip,.json" multiple style="display:none;" />
                     </div>
                     <div id="historyUploadStatus" class="muted mt-8"></div>
@@ -161,193 +195,202 @@
             <section class="tab-panel" id="tab-studio">
                 <div class="panel-header">
                     <div>
-                        <h1>AI Playlist Studio</h1>
-                        <p>Keep Stage 3 models warm in memory, steer by cluster or DJ pacing flow, and refine tracks live.</p>
+                        <h1>Playlist Studio</h1>
+                        <p>Steer discovery by prompt, taste cluster, or DJ pacing flow and refine tracks live</p>
                     </div>
                     <div class="header-actions">
                         <button class="pill" id="studioActiveModelPill" type="button" title="Active Stage 3 LLM (click to change in Preferences)">LLM: Auto</button>
-                        <button class="btn btn-sm" id="btnWarmMinilm" type="button">🔥 Warm Vector Engine</button>
-                        <button class="btn btn-sm" id="btnWarmLlm" type="button">🧠 Warm Local LLM</button>
-                        <button class="btn btn-sm" id="btnUnloadLlm" type="button">❄️ Unload LLM</button>
+                        <button class="btn btn-sm" id="btnWarmMinilm" type="button">Warm vectors</button>
+                        <button class="btn btn-sm" id="btnWarmLlm" type="button">Warm LLM</button>
+                        <button class="btn btn-sm" id="btnUnloadLlm" type="button">Unload LLM</button>
                     </div>
                 </div>
 
                 <div class="card">
                     <div class="subtab-bar">
-                        <button class="subtab-btn active" data-studio-mode="prompt" type="button">✨ Prompt &amp; Cluster</button>
-                        <button class="subtab-btn" data-studio-mode="bridge" type="button">🌉 Vibe Bridge (Start → End)</button>
-                        <button class="subtab-btn" data-studio-mode="blend" type="button">🤝 Taste Blend (Friend)</button>
+                        <button class="subtab-btn active" data-studio-mode="prompt" type="button">
+                            <svg class="icon" viewBox="0 0 24 24"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
+                            <span>Prompt &amp; Cluster</span>
+                        </button>
+                        <button class="subtab-btn" data-studio-mode="bridge" type="button">
+                            <svg class="icon" viewBox="0 0 24 24"><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 15V9a6 6 0 0 1 6-6h3"/></svg>
+                            <span>Vibe Bridge</span>
+                        </button>
+                        <button class="subtab-btn" data-studio-mode="blend" type="button">
+                            <svg class="icon" viewBox="0 0 24 24"><circle cx="9" cy="12" r="5"/><circle cx="15" cy="12" r="5"/></svg>
+                            <span>Taste Blend</span>
+                        </button>
                     </div>
 
                     <div id="studioModePrompt">
-                        <div class="preset-row mt-12">
-                            <span class="muted">Quick Prompts:</span>
-                            <button class="chip-btn preset-btn" data-prompt="135+ BPM high energy workout mix" type="button">⚡ 135+ BPM Workout</button>
-                            <button class="chip-btn preset-btn" data-prompt="Late night chill indie & synth vibes" type="button">🌙 Late Night Chill</button>
-                            <button class="chip-btn preset-btn" data-prompt="Sad melodic alternative rock vibes" type="button">🌧️ Melancholy Alt-Rock</button>
-                            <button class="chip-btn preset-btn" data-prompt="Upbeat summer feel-good pop & funk" type="button">☀️ Summer Feel-Good</button>
-                            <button class="chip-btn preset-btn" data-prompt="Underground hidden gems matching my taste" type="button">💎 Deep Cuts</button>
+                        <div class="preset-row mt-16">
+                            <span class="muted">Presets</span>
+                            <button class="chip-btn preset-btn" data-prompt="135+ BPM high energy workout mix" type="button">135+ BPM workout</button>
+                            <button class="chip-btn preset-btn" data-prompt="Late night chill indie & synth vibes" type="button">Late night chill</button>
+                            <button class="chip-btn preset-btn" data-prompt="Sad melodic alternative rock vibes" type="button">Melancholy alt-rock</button>
+                            <button class="chip-btn preset-btn" data-prompt="Upbeat summer feel-good pop & funk" type="button">Summer pop &amp; funk</button>
+                            <button class="chip-btn preset-btn" data-prompt="Underground hidden gems matching my taste" type="button">Deep cuts</button>
                         </div>
 
-                        <div class="field-group mt-12">
-                            <label for="studioPrompt">Playlist Prompt</label>
-                            <textarea id="studioPrompt" rows="2" placeholder="Describe your vibe, artist inspiration, BPM, mood, or library split (e.g. '40 song dark synthwave workout, 10 from my library, 30 new')..."></textarea>
+                        <div class="field-group mt-16">
+                            <label for="studioPrompt">Prompt</label>
+                            <textarea id="studioPrompt" rows="2" placeholder="Describe tempo, mood, artists, or library ratio"></textarea>
                         </div>
 
-                        <div class="studio-controls-grid mt-12">
+                        <div class="studio-controls-grid mt-16">
                             <div class="field-group">
-                                <label for="studioSize">Playlist Size (<span id="studioSizeVal">30</span>)</label>
+                                <label for="studioSize">Tracks (<span id="studioSizeVal">30</span>)</label>
                                 <input id="studioSize" type="range" min="5" max="100" value="30" />
                             </div>
                             <div class="field-group">
-                                <label for="studioCluster">Taste Seed Cluster</label>
+                                <label for="studioCluster">Seed cluster</label>
                                 <select id="studioCluster">
-                                    <option value="">Global Master Taste Centroid</option>
+                                    <option value="">Global taste centroid</option>
                                 </select>
                             </div>
                             <div class="field-group">
-                                <label for="studioFlow">DJ Sequencing Flow</label>
+                                <label for="studioFlow">Sequencing flow</label>
                                 <select id="studioFlow">
-                                    <option value="mmr">MMR Relevance &amp; Diversity</option>
-                                    <option value="warmup_peak_cooldown">Warm-Up → Peak → Cooldown</option>
-                                    <option value="energy_ramp">Energy Ramp (Low → High)</option>
-                                    <option value="chill_descent">Chill Descent (High → Low)</option>
-                                    <option value="harmonic">Harmonic Mixing (Camelot + BPM)</option>
-                                    <option value="shuffle">Artist-Spaced Shuffle</option>
+                                    <option value="mmr">MMR relevance &amp; diversity</option>
+                                    <option value="warmup_peak_cooldown">Warm-up → Peak → Cooldown</option>
+                                    <option value="energy_ramp">Energy ramp (low → high)</option>
+                                    <option value="chill_descent">Chill descent (high → low)</option>
+                                    <option value="harmonic">Harmonic mixing (Camelot + BPM)</option>
+                                    <option value="shuffle">Artist-spaced shuffle</option>
                                 </select>
                             </div>
                         </div>
 
-                        <div class="toggles-row mt-12">
+                        <div class="toggles-row mt-16">
                             <label class="checkbox-row">
                                 <input type="checkbox" id="studioFastMode" />
-                                <span>Fast Vector Mode (No LLM — Instant)</span>
+                                <span>Fast vector mode (no LLM)</span>
                             </label>
                             <label class="checkbox-row">
                                 <input type="checkbox" id="studioLocalOnly" />
-                                <span>Local Library Only</span>
+                                <span>Local library only</span>
                             </label>
                             <label class="checkbox-row">
                                 <input type="checkbox" id="studioCleanOnly" />
-                                <span>Clean Only (No Explicit)</span>
+                                <span>Clean only</span>
                             </label>
                             <label class="checkbox-row">
                                 <input type="checkbox" id="studioDeepCuts" />
-                                <span>Deep Cuts (Pop 15–58)</span>
+                                <span>Deep cuts (pop 15–58)</span>
                             </label>
                         </div>
 
-                        <div class="session-strip mt-12">
-                            <span class="muted">Active Session Guardrails:</span>
+                        <div class="session-strip mt-16">
+                            <span class="muted">Guardrails</span>
                             <span id="studioGuardrailsSummary" class="guard-summary">None</span>
-                            <button class="btn btn-xs" id="btnEditGuardrailsFromStudio" type="button">Edit Guardrails</button>
+                            <button class="btn btn-xs" id="btnEditGuardrailsFromStudio" type="button">Edit</button>
                         </div>
 
-                        <div class="btn-row mt-12">
-                            <button class="btn btn-primary" id="btnGeneratePlaylist" type="button">✨ Generate Playlist</button>
-                            <button class="btn" id="btnContinuePlaying" type="button" title="Seed mix from whatever is currently playing in your Spotify app">▶ Continue Playing Now</button>
+                        <div class="btn-row mt-16">
+                            <button class="btn btn-primary" id="btnGeneratePlaylist" type="button">Generate playlist</button>
+                            <button class="btn" id="btnContinuePlaying" type="button" title="Seed mix from currently playing Spotify track">Continue playing now</button>
                         </div>
                     </div>
 
                     <div id="studioModeBridge" style="display:none;">
-                        <p class="muted mt-12">Interpolate a smooth musical path between a starting track and an ending track from your library.</p>
+                        <p class="muted mt-16">Interpolate a smooth acoustic path between a start track and destination track from your library</p>
                         <datalist id="localTrackDatalist"></datalist>
-                        <div class="two-col mt-12">
+                        <div class="two-col mt-16">
                             <div class="field-group">
-                                <label for="bridgeStartInput">Start Track (Name or Artist)</label>
-                                <input id="bridgeStartInput" type="text" list="localTrackDatalist" placeholder="Type to search your library..." />
+                                <label for="bridgeStartInput">Start track</label>
+                                <input id="bridgeStartInput" type="text" list="localTrackDatalist" placeholder="Search library" />
                             </div>
                             <div class="field-group">
-                                <label for="bridgeEndInput">Destination Track (Name or Artist)</label>
-                                <input id="bridgeEndInput" type="text" list="localTrackDatalist" placeholder="Type to search your library..." />
+                                <label for="bridgeEndInput">Destination track</label>
+                                <input id="bridgeEndInput" type="text" list="localTrackDatalist" placeholder="Search library" />
                             </div>
                         </div>
-                        <div class="studio-controls-grid mt-12">
+                        <div class="studio-controls-grid mt-16">
                             <div class="field-group">
-                                <label for="bridgeSteps">Bridge Length (<span id="bridgeStepsVal">20</span> tracks)</label>
+                                <label for="bridgeSteps">Bridge length (<span id="bridgeStepsVal">20</span> tracks)</label>
                                 <input id="bridgeSteps" type="range" min="6" max="50" value="20" />
                             </div>
                             <label class="checkbox-row">
                                 <input type="checkbox" id="bridgeCleanOnly" />
-                                <span>Clean Only (No Explicit)</span>
+                                <span>Clean only</span>
                             </label>
                         </div>
-                        <div class="btn-row mt-12">
-                            <button class="btn btn-primary" id="btnGenerateBridge" type="button">🌉 Build Vibe Bridge</button>
+                        <div class="btn-row mt-16">
+                            <button class="btn btn-primary" id="btnGenerateBridge" type="button">Build vibe bridge</button>
                         </div>
                     </div>
 
                     <div id="studioModeBlend" style="display:none;">
-                        <p class="muted mt-12">Compare non-PII taste centroids with a friend and build a shared Taste Blend playlist.</p>
-                        <div class="btn-row mt-12">
-                            <a class="btn btn-sm" id="btnDownloadTasteCard" href="/api/taste/export-card?download=1">🪪 Download My Taste Card</a>
+                        <p class="muted mt-16">Compare non-PII taste centroids with a friend and build a shared playlist</p>
+                        <div class="btn-row mt-16">
+                            <a class="btn btn-sm" id="btnDownloadTasteCard" href="/api/taste/export-card?download=1">Download my taste card</a>
                             <input id="blendFriendFile" type="file" accept=".json" style="width:auto;" />
                             <span id="blendFriendStatus" class="muted">Upload a friend's <code>music_taste_card.json</code></span>
                         </div>
-                        <div class="studio-controls-grid mt-12">
+                        <div class="studio-controls-grid mt-16">
                             <div class="field-group">
-                                <label for="blendRatio">Blend Weight (<span id="blendRatioVal">50% Me / 50% Friend</span>)</label>
+                                <label for="blendRatio">Blend weight (<span id="blendRatioVal">50% Me / 50% Friend</span>)</label>
                                 <input id="blendRatio" type="range" min="0" max="100" value="50" />
                             </div>
                             <div class="field-group">
-                                <label for="blendPrompt">Optional Blend Vibe Steering</label>
-                                <input id="blendPrompt" type="text" placeholder="e.g. Late night road trip favorites" />
+                                <label for="blendPrompt">Vibe steering</label>
+                                <input id="blendPrompt" type="text" placeholder="Optional mood or genre" />
                             </div>
                             <div class="field-group">
-                                <label for="blendSize">Playlist Size</label>
+                                <label for="blendSize">Tracks</label>
                                 <input id="blendSize" type="number" min="5" max="100" value="30" />
                             </div>
                         </div>
-                        <div class="btn-row mt-12">
-                            <button class="btn btn-primary" id="btnGenerateBlend" type="button">🤝 Blend Tastes &amp; Generate</button>
+                        <div class="btn-row mt-16">
+                            <button class="btn btn-primary" id="btnGenerateBlend" type="button">Blend tastes and generate</button>
                         </div>
-                        <div id="blendCompatBanner" class="compat-banner mt-12" style="display:none;"></div>
+                        <div id="blendCompatBanner" class="compat-banner mt-16" style="display:none;"></div>
                     </div>
                 </div>
 
                 <div class="card mt-16" id="studioResultCard" style="display:none;">
                     <div class="result-header">
                         <div style="flex:1; min-width:260px;">
-                            <input id="resTitleInput" class="inline-title-input" type="text" placeholder="Playlist Title" />
-                            <input id="resDescInput" class="inline-desc-input mt-8" type="text" placeholder="Playlist Description" />
+                            <input id="resTitleInput" class="inline-title-input" type="text" placeholder="Playlist title" />
+                            <input id="resDescInput" class="inline-desc-input mt-8" type="text" placeholder="Playlist description" />
                             <div class="btn-row mt-8">
-                                <button class="btn btn-xs" id="btnSavePlaylistMeta" type="button">💾 Save Title/Desc</button>
+                                <button class="btn btn-xs" id="btnSavePlaylistMeta" type="button">Save metadata</button>
                                 <div id="resMetaBadges" class="badges-row"></div>
                             </div>
                         </div>
                         <div class="result-actions">
                             <div class="inline-control">
                                 <select id="resequenceSelect">
-                                    <option value="mmr">MMR Order</option>
-                                    <option value="warmup_peak_cooldown">Warm-Up → Peak → Cooldown</option>
-                                    <option value="energy_ramp">Energy Ramp</option>
-                                    <option value="chill_descent">Chill Descent</option>
+                                    <option value="mmr">MMR order</option>
+                                    <option value="warmup_peak_cooldown">Warm-up → Peak → Cooldown</option>
+                                    <option value="energy_ramp">Energy ramp</option>
+                                    <option value="chill_descent">Chill descent</option>
                                     <option value="harmonic">Harmonic (Camelot)</option>
-                                    <option value="shuffle">Artist-Spaced Shuffle</option>
+                                    <option value="shuffle">Artist-spaced shuffle</option>
                                 </select>
                                 <button class="btn btn-sm" id="btnResequence" type="button">Reorder</button>
                             </div>
                             <div class="inline-control">
                                 <select id="exportTargetSelect" title="Create new Spotify playlist or overwrite an existing owned playlist">
-                                    <option value="">Create New Playlist</option>
+                                    <option value="">New Spotify playlist</option>
                                 </select>
-                                <button class="btn btn-xs" id="btnLoadSpotifyPlaylists" type="button" title="Load your owned Spotify playlists">↻</button>
+                                <button class="btn btn-xs" id="btnLoadSpotifyPlaylists" type="button" title="Refresh Spotify playlists">↻</button>
                             </div>
                             <label class="checkbox-row">
                                 <input type="checkbox" id="chkExportPublic" />
                                 <span>Public</span>
                             </label>
-                            <button class="btn btn-primary btn-sm" id="btnExportSpotify" type="button">🎧 Export to Spotify</button>
+                            <button class="btn btn-sm" id="btnExportSpotify" type="button">Export to Spotify</button>
                             <div class="inline-control">
-                                <select id="ytmTargetSelect" title="Create new YouTube Music playlist or add to an existing one">
-                                    <option value="">Create New YTM Playlist</option>
+                                <select id="ytmTargetSelect" title="Create new YouTube Music playlist or append to an existing one">
+                                    <option value="">New YTM playlist</option>
                                 </select>
-                                <button class="btn btn-xs" id="btnLoadYtmPlaylists" type="button" title="Load your YouTube Music playlists">↻</button>
+                                <button class="btn btn-xs" id="btnLoadYtmPlaylists" type="button" title="Refresh YouTube Music playlists">↻</button>
                             </div>
-                            <button class="btn btn-sm" id="btnExportYtm" type="button">▶ Export to YT Music</button>
-                            <button class="btn btn-sm" id="btnTransferPlaylist" type="button" title="Resolve and transfer this playlist cross-platform">⇄ Transfer Cross-Platform</button>
-                            <button class="btn btn-sm" id="btnPlaySpotify" type="button" title="Start playback on your active Spotify device (Premium)">▶ Play</button>
-                            <button class="btn btn-sm" id="btnQueueSpotify" type="button" title="Add tracks to your active Spotify queue (Premium)">➕ Queue</button>
+                            <button class="btn btn-primary btn-sm" id="btnExportYtm" type="button">Export to YT Music</button>
+                            <button class="btn btn-sm" id="btnTransferPlaylist" type="button" title="Resolve and transfer cross-platform">Transfer</button>
+                            <button class="btn btn-sm" id="btnPlaySpotify" type="button" title="Play on active Spotify device">Play</button>
+                            <button class="btn btn-sm" id="btnQueueSpotify" type="button" title="Queue on active Spotify device">Queue</button>
                             <a class="btn btn-sm" id="btnDlCsv" href="/api/playlists/last/download?format=csv">CSV</a>
                             <a class="btn btn-sm" id="btnDlM3u" href="/api/playlists/last/download?format=m3u">M3U</a>
                             <a class="btn btn-sm" id="btnDlMd" href="/api/playlists/last/download?format=md">MD</a>
@@ -356,12 +399,12 @@
 
                     <div id="transferReportBanner" class="compat-banner mt-12" style="display:none;"></div>
 
-                    <div class="refine-bar mt-12">
-                        <input id="refineInput" type="text" placeholder="Refine conversationally (e.g. 'make it faster and higher energy', 'remove Drake', 'more synthwave')..." />
-                        <button class="btn btn-sm" id="btnRefinePlaylist" type="button">✨ Refine</button>
+                    <div class="refine-bar mt-16">
+                        <input id="refineInput" type="text" placeholder="Refine playlist (e.g. faster tempo, remove artist, more synth)" />
+                        <button class="btn btn-sm" id="btnRefinePlaylist" type="button">Refine</button>
                     </div>
 
-                    <div class="table-wrap mt-12">
+                    <div class="table-wrap mt-16">
                         <table class="data-table">
                             <thead>
                                 <tr>
@@ -387,58 +430,58 @@
             <section class="tab-panel" id="tab-map">
                 <div class="panel-header">
                     <div>
-                        <h1>Interactive Taste Vector Map</h1>
-                        <p>Explore 2D &amp; 3D PCA clusters, filter by recency weight, click dots to open Spotify, or expand a cluster.</p>
+                        <h1>Taste Map</h1>
+                        <p>Explore 2D and 3D acoustic clusters, filter by recency weight, or preview tracks inline</p>
                     </div>
                     <div class="header-actions">
                         <span id="mapProjectionBadge" class="badge badge-info">PCA</span>
-                        <select id="mapProjectionSelect" style="width:auto;" title="Projection algorithm used when rebuilding the map">
-                            <option value="pca">PCA Projection</option>
-                            <option value="umap">UMAP Projection</option>
+                        <select id="mapProjectionSelect" style="width:auto;" title="Projection algorithm">
+                            <option value="pca">PCA projection</option>
+                            <option value="umap">UMAP projection</option>
                         </select>
-                        <button class="btn btn-sm" id="btnRefreshMap" type="button">🔄 Rebuild Map</button>
+                        <button class="btn btn-sm" id="btnRefreshMap" type="button">Rebuild map</button>
                     </div>
                 </div>
 
                 <div id="mapEmptyState" class="card muted" style="display:none;">
-                    No Taste Map data found yet. Run Stage 2 or Rebuild Taste Map from the Dashboard first!
+                    No Taste Map data found yet. Run Stage 2 or Rebuild Taste Map from the Dashboard first.
                 </div>
 
                 <div id="mapContent" style="display:none;">
                     <div class="card">
                         <div class="map-toolbar">
-                            <input id="mapSearchBox" type="text" placeholder="Highlight track, artist, or genre..." />
+                            <input id="mapSearchBox" type="text" placeholder="Search track, artist, or genre" />
                             <div class="inline-control">
-                                <span class="muted">Min Weight:</span>
+                                <span class="muted">Min weight</span>
                                 <input id="mapWeightSlider" type="range" min="0" max="50" value="0" />
-                                <span id="mapWeightVal">0</span>
+                                <span id="mapWeightVal" class="accent-text">0</span>
                             </div>
                             <label class="checkbox-row">
                                 <input type="checkbox" id="chkShowEraPath" checked />
-                                <span>Show Era Path</span>
+                                <span>Era path</span>
                             </label>
-                            <select id="mapClickAction" style="width:auto;" title="Action when clicking a track dot">
-                                <option value="preview">Click: Preview in Dock</option>
-                                <option value="spotify">Click: Open Spotify</option>
+                            <select id="mapClickAction" style="width:auto;" title="Action when clicking a track">
+                                <option value="preview">Click: Preview in dock</option>
+                                <option value="spotify">Click: Open track link</option>
                             </select>
-                            <button class="btn btn-sm" id="btnToggle3D" type="button">Switch to 3D View</button>
+                            <button class="btn btn-sm" id="btnToggle3D" type="button">Switch to 3D</button>
                             <button class="btn btn-sm" id="btnResetMapFilter" type="button">Reset</button>
                             <span id="mapMatchCount" class="accent-text"></span>
                         </div>
                         <div id="mapOfflineBanner" class="warn-banner" style="display:none;">
-                            ⚠️ Plotly library failed to load (offline). Cluster cards remain interactive below.
+                            Plotly failed to load offline. Cluster cards remain interactive below.
                         </div>
                         <div id="tasteMapPlot" class="plot-box"></div>
                     </div>
 
                     <div class="two-col mt-16">
                         <div class="card">
-                            <h2>Cluster Acoustic Radar Profile</h2>
-                            <div id="clusterRadarPlot" class="radar-box"></div>
+                            <h2>Cluster acoustic radar</h2>
+                            <div id="clusterRadarPlot" class="radar-box mt-8"></div>
                         </div>
                         <div class="card">
-                            <h2>Taste Clusters &amp; 1-Click Expansion</h2>
-                            <div id="clusterCardsGrid" class="cluster-cards-grid"></div>
+                            <h2>Taste clusters</h2>
+                            <div id="clusterCardsGrid" class="cluster-cards-grid mt-12"></div>
                         </div>
                     </div>
                 </div>
@@ -448,18 +491,18 @@
             <section class="tab-panel" id="tab-analytics">
                 <div class="panel-header">
                     <div>
-                        <h1>History, Evolution &amp; Playlist Archive</h1>
-                        <p>Inspect multi-year streaming trends, rediscover Forgotten Favorites, and manage past playlists.</p>
+                        <h1>History &amp; Archive</h1>
+                        <p>Review multi-year listening trends, dormant favorites, and generated playlists</p>
                     </div>
                     <div class="header-actions">
-                        <button class="btn btn-sm" id="btnReloadAnalytics" type="button">↻ Refresh Analytics</button>
+                        <button class="btn btn-sm" id="btnReloadAnalytics" type="button">Refresh</button>
                     </div>
                 </div>
 
                 <div class="card">
-                    <h2>Generated Playlist Archive</h2>
-                    <div id="archiveEmpty" class="muted">No archived playlists yet. Generate one in Playlist Studio!</div>
-                    <div class="table-wrap" id="archiveTableWrap" style="display:none;">
+                    <h2>Generated playlist archive</h2>
+                    <div id="archiveEmpty" class="muted mt-8">No archived playlists yet. Generate one in Playlist Studio.</div>
+                    <div class="table-wrap mt-12" id="archiveTableWrap" style="display:none;">
                         <table class="data-table">
                             <thead>
                                 <tr>
@@ -479,27 +522,27 @@
                 <div class="card mt-16">
                     <div class="panel-header-inline">
                         <div>
-                            <h2>Forgotten Favorites Generator</h2>
-                            <p class="muted">Tracks you loved historically that haven't been played recently (respects Session Guardrails).</p>
+                            <h2>Forgotten favorites</h2>
+                            <p class="muted">Historically played tracks that have gone dormant (respects session guardrails)</p>
                         </div>
                     </div>
                     <div class="studio-controls-grid mt-12">
                         <div class="field-group">
-                            <label for="ffMinPlays">Minimum Lifetime Plays</label>
+                            <label for="ffMinPlays">Minimum lifetime plays</label>
                             <input id="ffMinPlays" type="number" min="1" max="500" value="8" />
                         </div>
                         <div class="field-group">
-                            <label for="ffDormantDays">Dormant Days (No Plays)</label>
+                            <label for="ffDormantDays">Dormant days</label>
                             <input id="ffDormantDays" type="number" min="30" max="2000" value="180" />
                         </div>
                         <div class="field-group">
-                            <label for="ffLimit">Track Limit</label>
+                            <label for="ffLimit">Track limit</label>
                             <input id="ffLimit" type="number" min="5" max="100" value="30" />
                         </div>
                     </div>
-                    <div class="btn-row mt-12">
-                        <button class="btn btn-sm" id="btnPreviewForgotten" type="button">🔍 Preview Forgotten Favorites</button>
-                        <button class="btn btn-primary btn-sm" id="btnSaveForgotten" type="button">💾 Generate &amp; Open in Studio</button>
+                    <div class="btn-row mt-16">
+                        <button class="btn btn-sm" id="btnPreviewForgotten" type="button">Preview</button>
+                        <button class="btn btn-primary btn-sm" id="btnSaveForgotten" type="button">Open in Studio</button>
                     </div>
                     <div class="table-wrap mt-12" id="forgottenTableWrap" style="display:none;">
                         <table class="data-table">
@@ -510,7 +553,7 @@
                                     <th>Artist</th>
                                     <th>Plays</th>
                                     <th>Hours</th>
-                                    <th>Last Played</th>
+                                    <th>Last played</th>
                                     <th>BPM</th>
                                 </tr>
                             </thead>
@@ -520,25 +563,25 @@
                 </div>
 
                 <div class="card mt-16">
-                    <div class="panel-header-inline" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                    <div class="panel-header-inline" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
                         <div>
-                            <h2>Personal Release Radar</h2>
-                            <p class="muted">Scan recent albums &amp; singles from your Top and Followed Spotify artists using your synced profile.</p>
+                            <h2>Personal release radar</h2>
+                            <p class="muted">Scan recent albums and singles from your top and followed artists</p>
                         </div>
                     </div>
                     <div class="studio-controls-grid mt-12">
                         <div class="field-group">
-                            <label for="radarDays">Lookback Window (days)</label>
+                            <label for="radarDays">Lookback window (days)</label>
                             <input id="radarDays" type="number" min="7" max="180" value="45" />
                         </div>
                         <div class="field-group">
-                            <label for="radarMaxArtists">Max Top/Followed Artists to Scan</label>
+                            <label for="radarMaxArtists">Max artists to scan</label>
                             <input id="radarMaxArtists" type="number" min="5" max="50" value="20" />
                         </div>
                     </div>
-                    <div class="btn-row mt-12">
-                        <button class="btn btn-sm" id="btnScanRadar" type="button">📡 Scan New Releases</button>
-                        <button class="btn btn-primary btn-sm" id="btnSaveRadar" type="button">💾 Open Release Radar in Studio</button>
+                    <div class="btn-row mt-16">
+                        <button class="btn btn-sm" id="btnScanRadar" type="button">Scan releases</button>
+                        <button class="btn btn-primary btn-sm" id="btnSaveRadar" type="button">Open in Studio</button>
                     </div>
                     <div id="radarSummary" class="muted mt-8"></div>
                     <div class="table-wrap mt-12" id="radarTableWrap" style="display:none;">
@@ -560,45 +603,45 @@
                 </div>
 
                 <div class="card mt-16">
-                    <div class="panel-header-inline" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                    <div class="panel-header-inline" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
                         <div>
-                            <h2>Library Hygiene &amp; Duplicate Audit</h2>
-                            <p class="muted">Find duplicate tracks across playlists, chronically skipped songs, and disliked tracks lingering in playlists.</p>
+                            <h2>Library hygiene &amp; duplicates</h2>
+                            <p class="muted">Find duplicate tracks, chronically skipped songs, and disliked tracks still in playlists</p>
                         </div>
-                        <button class="btn btn-sm" id="btnScanHygiene" type="button">🧹 Scan Library Hygiene</button>
+                        <button class="btn btn-sm" id="btnScanHygiene" type="button">Scan library</button>
                     </div>
-                    <div id="hygieneSummary" class="muted mt-8">Click <b>Scan Library Hygiene</b> to audit your synced Spotify playlists and streaming history.</div>
+                    <div id="hygieneSummary" class="muted mt-8">Run a scan to audit synced playlists and streaming history</div>
                     <div id="hygieneContent" class="hygiene-box mt-12" style="display:none;"></div>
                 </div>
 
                 <div id="extAnalyticsMissing" class="card mt-16 muted" style="display:none;">
-                    Extended streaming history stats not imported yet. Place Spotify Extended History JSONs in <code>extended_history/</code> and run <b>Import Extended History</b> on the Dashboard.
+                    Extended streaming history not imported yet. Drop history files in <code>extended_history/</code> and run Import history on the Dashboard.
                 </div>
 
                 <div id="extAnalyticsContent" style="display:none;">
                     <div class="grid-cards mt-16" id="analyticsOverviewCards"></div>
                     <div class="two-col mt-16">
                         <div class="card">
-                            <h2>Yearly Listening &amp; Acoustic Drift</h2>
-                            <div id="yearlyChartPlot" class="chart-box"></div>
+                            <h2>Yearly listening &amp; BPM drift</h2>
+                            <div id="yearlyChartPlot" class="chart-box mt-8"></div>
                         </div>
                         <div class="card">
-                            <h2>24-Hour Listening Pattern</h2>
-                            <div id="hourlyChartPlot" class="chart-box"></div>
+                            <h2>24-hour listening pattern</h2>
+                            <div id="hourlyChartPlot" class="chart-box mt-8"></div>
                         </div>
                     </div>
                     <div class="three-col mt-16">
                         <div class="card">
-                            <h2>Top All-Time Artists</h2>
-                            <div id="topArtistsList" class="mini-table-wrap"></div>
+                            <h2>Top all-time artists</h2>
+                            <div id="topArtistsList" class="mini-table-wrap mt-8"></div>
                         </div>
                         <div class="card">
-                            <h2>Top All-Time Tracks</h2>
-                            <div id="topTracksList" class="mini-table-wrap"></div>
+                            <h2>Top all-time tracks</h2>
+                            <div id="topTracksList" class="mini-table-wrap mt-8"></div>
                         </div>
                         <div class="card">
-                            <h2>Most Skipped Tracks</h2>
-                            <div id="mostSkippedList" class="mini-table-wrap"></div>
+                            <h2>Most skipped tracks</h2>
+                            <div id="mostSkippedList" class="mini-table-wrap mt-8"></div>
                         </div>
                     </div>
                 </div>
@@ -608,166 +651,166 @@
             <section class="tab-panel" id="tab-preferences">
                 <div class="panel-header">
                     <div>
-                        <h1>Preferences &amp; Persistent Defaults</h1>
-                        <p>Stored safely in <code>user_preferences.json</code> (gitignored) without modifying source code.</p>
+                        <h1>Preferences</h1>
+                        <p>Stored locally in <code>user_preferences.json</code> without modifying source files</p>
                     </div>
                 </div>
 
                 <div class="two-col">
                     <div class="card">
-                        <h2>Taste &amp; Weighting Defaults</h2>
-                        <div class="field-group mt-12">
-                            <label for="prefAvoidArtists">Default Avoid Artists (comma-separated)</label>
-                            <input id="prefAvoidArtists" type="text" placeholder="e.g. Artist A, Artist B" />
+                        <h2>Taste &amp; weighting defaults</h2>
+                        <div class="field-group mt-16">
+                            <label for="prefAvoidArtists">Default avoid artists (comma-separated)</label>
+                            <input id="prefAvoidArtists" type="text" placeholder="Artist A, Artist B" />
                         </div>
                         <div class="field-group mt-12">
-                            <label for="prefAvoidGenres">Default Avoid Genres (comma-separated)</label>
-                            <input id="prefAvoidGenres" type="text" placeholder="e.g. country, heavy metal" />
+                            <label for="prefAvoidGenres">Default avoid genres (comma-separated)</label>
+                            <input id="prefAvoidGenres" type="text" placeholder="country, heavy metal" />
                         </div>
                         <div class="field-group mt-12">
-                            <label for="prefHalfLife">Extended History Half-Life (days: 7–1825)</label>
+                            <label for="prefHalfLife">History half-life (days: 7–1825)</label>
                             <input id="prefHalfLife" type="number" min="7" max="1825" value="120" />
                         </div>
                         <div class="field-group mt-12">
-                            <label for="prefMaxLiked">Max Liked Songs to Sync (Stage 1)</label>
+                            <label for="prefMaxLiked">Max liked songs to sync</label>
                             <input id="prefMaxLiked" type="number" min="50" max="5000" value="500" />
                         </div>
                         <div class="field-group mt-12">
-                            <label for="prefDefaultSize">Default Playlist Size (5–100)</label>
+                            <label for="prefDefaultSize">Default playlist size (5–100)</label>
                             <input id="prefDefaultSize" type="number" min="5" max="100" value="30" />
                         </div>
-                        <label class="checkbox-row mt-12">
+                        <label class="checkbox-row mt-16">
                             <input type="checkbox" id="prefSkipPenalty" checked />
-                            <span>Enable Skip-Rate Negative Weighting (down-weight tracks skipped ≥60%)</span>
+                            <span>Down-weight tracks skipped 60% or more</span>
                         </label>
                         <label class="checkbox-row mt-8">
                             <input type="checkbox" id="prefDefaultFast" />
-                            <span>Default to Fast Vector Mode (No LLM)</span>
+                            <span>Default to fast vector mode (no LLM)</span>
                         </label>
                         <label class="checkbox-row mt-8">
                             <input type="checkbox" id="prefDefaultPublic" />
-                            <span>Default Spotify Exports to Public</span>
+                            <span>Default exports to public</span>
                         </label>
                         <label class="checkbox-row mt-8">
                             <input type="checkbox" id="prefSyncLikesSpotify" />
-                            <span>Sync 👍 Track Likes to Spotify Liked Songs (<code>PUT /me/library</code>)</span>
+                            <span>Sync track likes to Spotify library</span>
                         </label>
                     </div>
 
                     <div class="card">
-                        <h2>Artist Weight Penalties (Soft Down-Weighting)</h2>
-                        <p class="muted">Multiply an artist's clustering weight by e.g. <code>0.05</code> (exact artist match).</p>
+                        <h2>Artist weight penalties</h2>
+                        <p class="muted">Multiply an artist's clustering weight (e.g. <code>0.05</code>)</p>
                         <div class="chip-input-row mt-12">
-                            <input id="penArtistName" type="text" placeholder="Artist Name" />
-                            <input id="penArtistMult" type="number" min="0" max="2" step="0.05" value="0.05" style="max-width:95px;" />
+                            <input id="penArtistName" type="text" placeholder="Artist name" />
+                            <input id="penArtistMult" type="number" min="0" max="2" step="0.05" value="0.05" style="max-width:96px;" />
                             <button class="btn btn-sm" id="btnAddPenalty" type="button">Add</button>
                         </div>
                         <div id="penaltyList" class="chips-wrap mt-12"></div>
 
                         <div class="divider"></div>
-                        <h2>Spotify Developer Client ID (Optional Override)</h2>
-                        <p class="muted">Current status: <span id="prefCidMask">-</span></p>
+                        <h2>Spotify Client ID</h2>
+                        <p class="muted">Status: <span id="prefCidMask">-</span></p>
                         <div class="field-group mt-8">
-                            <input id="prefSpotifyCid" type="text" placeholder="Leave blank to keep existing Client ID" />
+                            <input id="prefSpotifyCid" type="text" placeholder="Leave blank to keep current" />
                         </div>
 
                         <div class="btn-row mt-16">
-                            <button class="btn btn-primary" id="btnSavePreferences" type="button">💾 Save Preferences</button>
+                            <button class="btn btn-primary" id="btnSavePreferences" type="button">Save preferences</button>
                         </div>
                     </div>
                 </div>
 
                 <div class="card mt-16">
-                    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
                         <div>
-                            <h2>Local AI Model &amp; Hardware Tier Selector (100% Free &amp; Local)</h2>
-                            <p class="muted">Automatically detects your CPU, RAM, Intel iGPU, and NVIDIA RTX VRAM to recommend the smartest zero-cost local model for your device.</p>
+                            <h2>Local LLM &amp; hardware tier</h2>
+                            <p class="muted">Select between local Ollama (CUDA) and built-in OpenVINO models</p>
                         </div>
-                        <button class="btn btn-primary btn-sm" id="btnSaveLlmConfig" type="button">💾 Save AI Model Settings</button>
+                        <button class="btn btn-primary btn-sm" id="btnSaveLlmConfig" type="button">Save model settings</button>
                     </div>
 
-                    <div id="llmHardwareBanner" class="hw-banner mt-12">Detecting local CPU, RAM &amp; GPU hardware...</div>
+                    <div id="llmHardwareBanner" class="hw-banner mt-12">Detecting hardware...</div>
 
-                    <div class="two-col mt-12">
+                    <div class="two-col mt-16">
                         <div class="field-group">
-                            <label for="prefLlmBackend">Local Inference Engine</label>
+                            <label for="prefLlmBackend">Inference backend</label>
                             <select id="prefLlmBackend">
-                                <option value="openvino">OpenVINO GenAI (Zero-Setup Built-in — CPU / Intel iGPU)</option>
-                                <option value="ollama">Local Ollama Server (Best for NVIDIA RTX 4050/4060 CUDA Speed)</option>
-                                <option value="openai_local">Local OpenAI-Compatible Endpoint (LM Studio / llama.cpp)</option>
+                                <option value="openvino">OpenVINO GenAI (built-in CPU / Intel iGPU)</option>
+                                <option value="ollama">Local Ollama server (NVIDIA CUDA)</option>
+                                <option value="openai_local">OpenAI-compatible endpoint (LM Studio / llama.cpp)</option>
                             </select>
                         </div>
                         <div class="field-group">
-                            <label for="prefLlmDevice">OpenVINO Accelerator Preference</label>
+                            <label for="prefLlmDevice">OpenVINO device</label>
                             <select id="prefLlmDevice">
-                                <option value="auto">Auto (GPU → CPU → NPU — Recommended)</option>
+                                <option value="auto">Auto (GPU → CPU → NPU)</option>
                                 <option value="GPU">Integrated / Arc GPU</option>
-                                <option value="CPU">CPU Only (Recommended for 32 GB Ryzen AI HX / Desktops)</option>
+                                <option value="CPU">CPU only</option>
                                 <option value="NPU">Intel NPU</option>
                             </select>
                         </div>
                     </div>
 
-                    <div id="llmTierCards" class="tier-grid mt-12"></div>
+                    <div id="llmTierCards" class="tier-grid mt-16"></div>
 
-                    <div id="ollamaConfigBox" class="ollama-box mt-12" style="display:none;">
-                        <h3>Local Ollama / CUDA Server Settings</h3>
-                        <p class="muted">Run <code>ollama pull qwen3:8b</code> (or <code>gemma3:12b</code> on RTX 4060 / 32GB systems) for zero-cost GPU acceleration.</p>
-                        <div class="two-col mt-8">
+                    <div id="ollamaConfigBox" class="ollama-box mt-16" style="display:none;">
+                        <h3>Local Ollama server</h3>
+                        <p class="muted">Connect to your local Ollama instance (e.g. <code>qwen3.5:9b</code> or <code>qwen3:8b</code>)</p>
+                        <div class="two-col mt-12">
                             <div class="field-group">
-                                <label for="prefOllamaUrl">Local Server URL</label>
+                                <label for="prefOllamaUrl">Server URL</label>
                                 <div class="chip-input-row">
                                     <input id="prefOllamaUrl" type="text" value="http://127.0.0.1:11434" placeholder="http://127.0.0.1:11434" />
-                                    <button class="btn btn-sm" id="btnProbeOllama" type="button">🔍 Detect Running Models</button>
+                                    <button class="btn btn-sm" id="btnProbeOllama" type="button">Detect models</button>
                                 </div>
                             </div>
                             <div class="field-group">
-                                <label for="prefOllamaModel">Model Tag</label>
-                                <input id="prefOllamaModel" type="text" placeholder="e.g. qwen3:8b" />
+                                <label for="prefOllamaModel">Model tag</label>
+                                <input id="prefOllamaModel" type="text" placeholder="qwen3.5:9b" />
                             </div>
                         </div>
-                        <div id="ollamaTierChips" class="preset-row mt-8"></div>
+                        <div id="ollamaTierChips" class="preset-row mt-12"></div>
                         <div id="ollamaDetectedModels" class="muted mt-8"></div>
                     </div>
                 </div>
 
                 <div class="card mt-16">
-                    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
                         <div>
-                            <h2>YouTube Music Authentication (Browser Headers &amp; Google OAuth)</h2>
-                            <p class="muted">Connect YouTube Music for Stage 1 sync, Unified Mode, and cross-platform playlist export.</p>
+                            <h2>YouTube Music authentication</h2>
+                            <p class="muted">Connect YouTube Music for Stage 1 sync and playlist export</p>
                         </div>
-                        <span id="ytmAuthStatusBadge" class="badge badge-warn">Checking...</span>
+                        <span id="ytmAuthStatusBadge" class="badge badge-warn">Checking</span>
                     </div>
-                    <p id="ytmAuthStatusDetails" class="muted mt-8">No YouTube Music credentials configured yet.</p>
+                    <p id="ytmAuthStatusDetails" class="muted mt-8">No YouTube Music credentials configured yet</p>
 
-                    <div class="two-col mt-12">
+                    <div class="two-col mt-16">
                         <div>
-                            <h3>Option A: Browser Headers (Fastest)</h3>
-                            <p class="muted">Open DevTools → Network on <code>music.youtube.com</code>, copy Request Headers from any <code>/browse</code> request, and paste below.</p>
-                            <textarea id="ytmHeadersInput" class="mt-8" rows="4" placeholder="Paste raw Request Headers from music.youtube.com (Cookie, Authorization / X-Goog-AuthUser)..."></textarea>
-                            <div class="btn-row mt-8">
-                                <button class="btn btn-sm btn-primary" id="btnSaveYtmHeaders" type="button">💾 Save Browser Headers</button>
+                            <h3>Option A: Browser headers</h3>
+                            <p class="muted">In DevTools → Network on <code>music.youtube.com</code>, copy Request Headers or cURL from any <code>/browse</code> request</p>
+                            <textarea id="ytmHeadersInput" class="mt-8" rows="4" placeholder="Paste Request Headers or Copy as cURL"></textarea>
+                            <div class="btn-row mt-12">
+                                <button class="btn btn-sm btn-primary" id="btnSaveYtmHeaders" type="button">Save headers</button>
                             </div>
                         </div>
                         <div>
-                            <h3>Option B: Google Cloud TV/Limited-Input OAuth</h3>
-                            <p class="muted">Enter YouTube Data API v3 TVs &amp; Limited Input OAuth Client ID and Secret.</p>
+                            <h3>Option B: Google OAuth (TV / Limited Input)</h3>
+                            <p class="muted">Enter your YouTube Data API v3 TV &amp; Limited Input OAuth client credentials</p>
                             <div class="field-group mt-8">
-                                <label for="ytmOauthClientId">Google OAuth Client ID</label>
+                                <label for="ytmOauthClientId">Client ID</label>
                                 <input id="ytmOauthClientId" type="text" placeholder="xxxxx.apps.googleusercontent.com" />
                             </div>
                             <div class="field-group mt-8">
-                                <label for="ytmOauthClientSecret">Google OAuth Client Secret</label>
+                                <label for="ytmOauthClientSecret">Client secret</label>
                                 <input id="ytmOauthClientSecret" type="password" placeholder="GOCSPX-..." />
                             </div>
-                            <div class="btn-row mt-8">
-                                <button class="btn btn-sm" id="btnStartYtmOauth" type="button">🔑 Start Google OAuth Device Flow</button>
+                            <div class="btn-row mt-12">
+                                <button class="btn btn-sm" id="btnStartYtmOauth" type="button">Start device flow</button>
                             </div>
                             <div id="ytmOauthPromptBox" class="ytm-oauth-box mt-12" style="display:none;">
                                 <div id="ytmOauthInstructions" class="muted"></div>
                                 <div class="btn-row mt-8">
-                                    <button class="btn btn-sm btn-primary" id="btnCompleteYtmOauth" type="button">✅ I Authorized — Complete Login</button>
+                                    <button class="btn btn-sm btn-primary" id="btnCompleteYtmOauth" type="button">Complete login</button>
                                 </div>
                             </div>
                         </div>
@@ -776,15 +819,15 @@
 
                 <div class="two-col mt-16">
                     <div class="card">
-                        <h2>Weekly Auto-Updating Playlist</h2>
-                        <p class="muted">Automatically refresh a persistent Spotify playlist on a weekly schedule (Windows Task Scheduler).</p>
-                        <div class="field-group mt-12">
-                            <label for="autoTargetPlaylistId">Target Spotify Playlist ID or URL (blank creates &amp; pins new)</label>
-                            <input id="autoTargetPlaylistId" type="text" placeholder="e.g. 37i9dQZF1DX... or leave blank to auto-create" />
+                        <h2>Weekly playlist automation</h2>
+                        <p class="muted">Refresh a target playlist automatically via Windows Task Scheduler</p>
+                        <div class="field-group mt-16">
+                            <label for="autoTargetPlaylistId">Target playlist ID or URL</label>
+                            <input id="autoTargetPlaylistId" type="text" placeholder="Blank creates a new playlist" />
                         </div>
                         <div class="field-group mt-12">
-                            <label for="autoPrompt">Weekly Prompt</label>
-                            <input id="autoPrompt" type="text" placeholder="Fresh high-signal weekly discoveries matching my current taste" />
+                            <label for="autoPrompt">Weekly prompt</label>
+                            <input id="autoPrompt" type="text" placeholder="Fresh weekly discoveries matching my taste" />
                         </div>
                         <div class="studio-controls-grid mt-12">
                             <div class="field-group">
@@ -792,16 +835,16 @@
                                 <input id="autoSize" type="number" min="5" max="100" value="30" />
                             </div>
                             <div class="field-group">
-                                <label for="autoFlowMode">DJ Flow</label>
+                                <label for="autoFlowMode">Sequencing flow</label>
                                 <select id="autoFlowMode">
                                     <option value="harmonic">Harmonic (Camelot)</option>
-                                    <option value="mmr">MMR Relevance</option>
-                                    <option value="warmup_peak_cooldown">Warm-Up → Peak → Cooldown</option>
-                                    <option value="energy_ramp">Energy Ramp</option>
+                                    <option value="mmr">MMR relevance</option>
+                                    <option value="warmup_peak_cooldown">Warm-up → Peak → Cooldown</option>
+                                    <option value="energy_ramp">Energy ramp</option>
                                 </select>
                             </div>
                             <div class="field-group">
-                                <label for="autoDay">Day of Week</label>
+                                <label for="autoDay">Day</label>
                                 <select id="autoDay">
                                     <option value="SUN">Sunday</option>
                                     <option value="MON">Monday</option>
@@ -813,40 +856,40 @@
                                 </select>
                             </div>
                             <div class="field-group">
-                                <label for="autoTime">Time (24h HH:MM)</label>
+                                <label for="autoTime">Time (24h)</label>
                                 <input id="autoTime" type="text" value="09:00" placeholder="09:00" />
                             </div>
                         </div>
                         <div class="toggles-row mt-12">
-                            <label class="checkbox-row"><input type="checkbox" id="autoFast" checked /><span>Fast Mode</span></label>
+                            <label class="checkbox-row"><input type="checkbox" id="autoFast" checked /><span>Fast mode</span></label>
                             <label class="checkbox-row"><input type="checkbox" id="autoRefreshS1" /><span>Sync Stage 1 first</span></label>
                             <label class="checkbox-row"><input type="checkbox" id="autoRefreshS2" /><span>Rebuild Stage 2 first</span></label>
                         </div>
-                        <div class="muted mt-12" id="autoStatusLine">Last Run: Never</div>
-                        <div class="muted mt-8" id="autoTaskLine">Scheduler: Checking...</div>
-                        <div class="btn-row mt-12">
-                            <button class="btn btn-sm" id="btnAutoSave" type="button">Save Schedule Settings</button>
-                            <button class="btn btn-primary btn-sm" id="btnAutoInstall" type="button">📅 Register Weekly Task</button>
-                            <button class="btn btn-sm btn-danger" id="btnAutoRemove" type="button">Remove Task</button>
-                            <button class="btn btn-sm" id="btnAutoRunNow" type="button">▶ Run Now</button>
+                        <div class="muted mt-12" id="autoStatusLine">Last run: Never</div>
+                        <div class="muted mt-8" id="autoTaskLine">Scheduler: Checking</div>
+                        <div class="btn-row mt-16">
+                            <button class="btn btn-sm" id="btnAutoSave" type="button">Save settings</button>
+                            <button class="btn btn-primary btn-sm" id="btnAutoInstall" type="button">Register task</button>
+                            <button class="btn btn-sm btn-danger" id="btnAutoRemove" type="button">Remove task</button>
+                            <button class="btn btn-sm" id="btnAutoRunNow" type="button">Run now</button>
                         </div>
                     </div>
 
                     <div class="card">
                         <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
                             <div>
-                                <h2>Track Feedback Memory (👍 / 👎)</h2>
-                                <p class="muted">Stored in <code>user_feedback.json</code>. Disliked tracks are strictly blocked across Studio &amp; Forgotten Favorites.</p>
+                                <h2>Track feedback memory</h2>
+                                <p class="muted">Stored in <code>user_feedback.json</code>. Disliked tracks are blocked across Studio and Forgotten Favorites.</p>
                             </div>
-                            <button class="btn btn-xs" id="btnRefreshFeedback" type="button">↻ Refresh</button>
+                            <button class="btn btn-xs" id="btnRefreshFeedback" type="button">Refresh</button>
                         </div>
-                        <div class="field-group mt-12">
-                            <label>👍 Liked Tracks (Soft Boost)</label>
-                            <div id="feedbackLikedList" class="mini-table-wrap muted">None yet.</div>
+                        <div class="field-group mt-16">
+                            <label>Liked tracks (soft boost)</label>
+                            <div id="feedbackLikedList" class="mini-table-wrap muted">None yet</div>
                         </div>
-                        <div class="field-group mt-12">
-                            <label>👎 Disliked Tracks (Hard Blocked)</label>
-                            <div id="feedbackDislikedList" class="mini-table-wrap muted">None yet.</div>
+                        <div class="field-group mt-16">
+                            <label>Disliked tracks (blocked)</label>
+                            <div id="feedbackDislikedList" class="mini-table-wrap muted">None yet</div>
                         </div>
                     </div>
                 </div>
@@ -856,11 +899,11 @@
             <section class="tab-panel" id="tab-doctor">
                 <div class="panel-header">
                     <div>
-                        <h1>System Doctor &amp; Diagnostics</h1>
-                        <p>Inspect Python environment, OpenVINO devices, ReccoBeats cache health, and persisted logs.</p>
+                        <h1>System Doctor</h1>
+                        <p>Inspect Python packages, compute runtimes, ReccoBeats cache health, and job logs</p>
                     </div>
                     <div class="header-actions">
-                        <button class="btn btn-sm" id="btnRunDoctor" type="button">🩺 Run Diagnostics</button>
+                        <button class="btn btn-sm" id="btnRunDoctor" type="button">Run diagnostics</button>
                     </div>
                 </div>
 
@@ -868,25 +911,25 @@
 
                 <div class="two-col mt-16">
                     <div class="card">
-                        <h2>Installed Packages &amp; Runtimes</h2>
+                        <h2>Installed packages &amp; runtimes</h2>
                         <div id="doctorPackages" class="pkg-grid mt-12"></div>
                     </div>
                     <div class="card">
-                        <h2>ReccoBeats Cache Maintenance</h2>
-                        <p class="muted">Inspect cached acoustic telemetry and clear failed/not-found entries for retry.</p>
+                        <h2>ReccoBeats cache</h2>
+                        <p class="muted">Inspect cached acoustic telemetry and clear failed entries for retry</p>
                         <div id="doctorRbStats" class="mt-12"></div>
-                        <div class="btn-row mt-12">
-                            <button class="btn btn-sm" id="btnPurgePoisoned" type="button">🧹 Purge Poisoned Defaults</button>
-                            <button class="btn btn-sm" id="btnPurgeNotFound" type="button">🔄 Clear Poisoned + Not-Found</button>
+                        <div class="btn-row mt-16">
+                            <button class="btn btn-sm" id="btnPurgePoisoned" type="button">Purge defaults</button>
+                            <button class="btn btn-sm" id="btnPurgeNotFound" type="button">Clear defaults + not found</button>
                         </div>
                     </div>
                 </div>
 
                 <div class="card mt-16">
-                    <h2>Recent Persistent Job Logs (<code>logs/</code>)</h2>
+                    <h2>Job logs (<code>logs/</code>)</h2>
                     <div class="two-col mt-12">
                         <div id="logFilesList" class="log-files-list"></div>
-                        <pre id="logFileViewer" class="log-viewer">Select a log file to inspect...</pre>
+                        <pre id="logFileViewer" class="log-viewer">Select a log file to inspect</pre>
                     </div>
                 </div>
             </section>
@@ -898,22 +941,22 @@
         <div class="console-bar">
             <div class="console-title">
                 <span class="job-dot" id="drawerJobDot"></span>
-                <span id="drawerJobTitle">Live Job Console — Idle</span>
+                <span id="drawerJobTitle">Job Console — Idle</span>
             </div>
             <div class="console-actions">
-                <button class="btn btn-danger btn-xs" id="btnCancelJob" type="button" style="display:none;">⏹ Cancel Job</button>
+                <button class="btn btn-danger btn-xs" id="btnCancelJob" type="button" style="display:none;">Cancel job</button>
                 <button class="btn btn-xs" id="btnClearConsole" type="button">Clear</button>
                 <button class="btn btn-xs" id="btnCollapseConsole" type="button">Toggle</button>
             </div>
         </div>
-        <pre class="console-output" id="consoleOutput">Waiting for pipeline activity...</pre>
+        <pre class="console-output" id="consoleOutput">Waiting for pipeline activity</pre>
     </section>
 
-    <!-- SPOTIFY EMBEDDED TRACK PREVIEW DOCK -->
+    <!-- EMBEDDED TRACK PREVIEW DOCK -->
     <div class="preview-dock" id="previewDock" style="display:none;">
         <div class="preview-dock-bar">
-            <span id="previewTrackTitle" class="preview-track-title">Track Preview</span>
-            <button class="btn btn-xs" id="btnClosePreview" type="button" aria-label="Close Preview">✕</button>
+            <span id="previewTrackTitle" class="preview-track-title">Track preview</span>
+            <button class="btn btn-xs" id="btnClosePreview" type="button" aria-label="Close preview">✕</button>
         </div>
         <iframe id="previewIframe" width="320" height="80" frameborder="0" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
     </div>
@@ -921,7 +964,7 @@
     <!-- CONFIRM MODAL -->
     <div class="modal-backdrop" id="confirmModal" style="display:none;">
         <div class="modal-box">
-            <h2 id="confirmTitle">Confirm Action</h2>
+            <h2 id="confirmTitle">Confirm action</h2>
             <p id="confirmMessage" class="muted mt-8"></p>
             <div class="btn-row mt-16" style="justify-content:flex-end;">
                 <button class="btn btn-sm" id="confirmCancelBtn" type="button">Cancel</button>

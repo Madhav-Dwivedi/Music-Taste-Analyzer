@@ -194,6 +194,8 @@
         document.querySelectorAll(".tab-panel").forEach((p) => {
             p.classList.toggle("active", p.id === `tab-${tabName}`);
         });
+        const contentArea = document.querySelector(".content-area");
+        if (contentArea) contentArea.scrollTop = 0;
         if (tabName === "map") loadTasteMap();
         if (tabName === "analytics") {
             loadPlaylistsArchive();
@@ -600,8 +602,8 @@
                         <div class="btn-row" style="gap:4px;">
                             ${canPreview ? `<button class="btn btn-xs preview-btn" data-sp-id="${escapeHtml(spId)}" data-vid="${escapeHtml(vid)}" data-provider="${escapeHtml(prov)}" data-title="${escapeHtml(t.name)} — ${escapeHtml(t.artist)}" type="button" title="Preview">▶</button>` : ""}
                             ${spId ? `<button class="btn btn-xs save-lib-btn" data-id="${escapeHtml(spId)}" data-title="${escapeHtml(t.name)}" type="button" title="Save to Spotify Library">♡</button>` : ""}
-                            <button class="btn btn-xs fb-btn like-btn ${isLiked ? "active-like" : ""}" data-idx="${idx}" type="button" title="Thumbs Up">👍</button>
-                            <button class="btn btn-xs fb-btn dislike-btn ${isDisliked ? "active-dislike" : ""}" data-idx="${idx}" type="button" title="Thumbs Down (Block Future)">👎</button>
+                            <button class="btn btn-xs fb-btn like-btn ${isLiked ? "active-like" : ""}" data-idx="${idx}" type="button" title="Like track">+</button>
+                            <button class="btn btn-xs fb-btn dislike-btn ${isDisliked ? "active-dislike" : ""}" data-idx="${idx}" type="button" title="Dislike track (block future)">−</button>
                             <button class="btn btn-xs swap-btn" data-idx="${idx}" type="button" title="Swap track">↻</button>
                             <button class="btn btn-xs btn-danger remove-btn" data-idx="${idx}" type="button" title="Remove track">✕</button>
                         </div>
@@ -664,7 +666,7 @@
         }
         document.getElementById("mapOfflineBanner").style.display = "none";
 
-        const colors = ["#00E676", "#00E5FF", "#E040FB", "#FFEA00", "#FF6D00", "#FF1744", "#7C4DFF"];
+        const colors = ["#e5a04b", "#5b9bd5", "#4cc38a", "#d96b6b", "#9b87c2", "#52b7b1", "#c98b5b"];
         const q = document.getElementById("mapSearchBox").value.trim().toLowerCase();
         const minW = parseFloat(document.getElementById("mapWeightSlider").value || "0");
         document.getElementById("mapWeightVal").textContent = String(minW);
@@ -715,7 +717,7 @@
                     `<br>Genres: ${escapeHtml(t.genres || "None")}` +
                     afLine +
                     `<br>Weight: ${t.recency_weight}` +
-                    (t.id ? "<br><i>Click to preview or open Spotify</i>" : "")
+                    (t.id ? "<br>Click to preview or open track" : "")
                 );
             });
 
@@ -746,8 +748,8 @@
                     text: eraTraj.map((e) => String(e.year)),
                     hoverinfo: "text",
                     hovertext: eraTraj.map((e) => `<b>${escapeHtml(e.year)}</b>: ${escapeHtml(e.plays)} plays`),
-                    line: { color: "#FFB300", width: 4 },
-                    marker: { size: 6, color: "#FFB300" },
+                    line: { color: "#e5a04b", width: 4 },
+                    marker: { size: 6, color: "#e5a04b" },
                 });
             } else {
                 traces.push({
@@ -760,8 +762,8 @@
                     textposition: "top center",
                     hoverinfo: "text",
                     hovertext: eraTraj.map((e) => `<b>${escapeHtml(e.year)}</b>: ${escapeHtml(e.plays)} plays (${escapeHtml(e.unique_tracks)} tracks)`),
-                    line: { color: "#FFB300", width: 3, dash: "dot" },
-                    marker: { size: 10, color: "#FFB300", symbol: "circle-open", line: { width: 2, color: "#FFFFFF" } },
+                    line: { color: "#e5a04b", width: 3, dash: "dot" },
+                    marker: { size: 10, color: "#e5a04b", symbol: "circle-open", line: { width: 2, color: "#ededed" } },
                 });
             }
         }
@@ -779,23 +781,23 @@
         };
         const layout = state.is3d
             ? {
-                  paper_bgcolor: "#171b2a",
-                  font: { color: "#e6e9f2" },
+                  paper_bgcolor: "#19191b",
+                  font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
                   scene: {
-                      bgcolor: "#10131e",
-                      xaxis: { title: axisLabel(0, ev3), gridcolor: "#272c40" },
-                      yaxis: { title: axisLabel(1, ev3), gridcolor: "#272c40" },
-                      zaxis: { title: axisLabel(2, ev3), gridcolor: "#272c40" },
+                      bgcolor: "#141415",
+                      xaxis: { title: axisLabel(0, ev3), gridcolor: "rgba(237,237,237,0.08)" },
+                      yaxis: { title: axisLabel(1, ev3), gridcolor: "rgba(237,237,237,0.08)" },
+                      zaxis: { title: axisLabel(2, ev3), gridcolor: "rgba(237,237,237,0.08)" },
                   },
                   margin: { l: 10, r: 10, t: 20, b: 30 },
                   legend: { orientation: "h", y: -0.05 },
               }
             : {
-                  paper_bgcolor: "#171b2a",
-                  plot_bgcolor: "#10131e",
-                  font: { color: "#e6e9f2" },
-                  xaxis: { title: axisLabel(0, ev2), gridcolor: "#272c40" },
-                  yaxis: { title: axisLabel(1, ev2), gridcolor: "#272c40" },
+                  paper_bgcolor: "#19191b",
+                  plot_bgcolor: "#141415",
+                  font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
+                  xaxis: { title: axisLabel(0, ev2), gridcolor: "rgba(237,237,237,0.08)" },
+                  yaxis: { title: axisLabel(1, ev2), gridcolor: "rgba(237,237,237,0.08)" },
                   margin: { l: 50, r: 20, t: 20, b: 70 },
                   legend: { orientation: "h", y: -0.18 },
               };
@@ -820,7 +822,7 @@
     function renderClusterRadar(clusters) {
         const el = document.getElementById("clusterRadarPlot");
         if (typeof Plotly === "undefined") return;
-        const colors = ["#00E676", "#00E5FF", "#E040FB", "#FFEA00", "#FF6D00", "#FF1744", "#7C4DFF"];
+        const colors = ["#e5a04b", "#5b9bd5", "#4cc38a", "#d96b6b", "#9b87c2", "#52b7b1", "#c98b5b"];
         const traces = clusters.map((c, idx) => {
             const t = c.telemetry || {};
             const normBpm = t.avg_bpm != null ? Math.min(1, Math.max(0, (t.avg_bpm - 60) / 120)) : 0.5;
@@ -846,12 +848,12 @@
             el,
             traces,
             {
-                paper_bgcolor: "#171b2a",
-                font: { color: "#e6e9f2", size: 11 },
+                paper_bgcolor: "#19191b",
+                font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
                 polar: {
-                    bgcolor: "#10131e",
-                    radialaxis: { visible: true, range: [0, 1], gridcolor: "#272c40" },
-                    angularaxis: { gridcolor: "#272c40" },
+                    bgcolor: "#141415",
+                    radialaxis: { visible: true, range: [0, 1], gridcolor: "rgba(237,237,237,0.08)" },
+                    angularaxis: { gridcolor: "rgba(237,237,237,0.08)" },
                 },
                 margin: { l: 40, r: 40, t: 25, b: 25 },
                 legend: { orientation: "h", y: -0.15 },
@@ -873,8 +875,8 @@
                     <div class="cluster-mini-meta">${escapeHtml(c.weighted_share_pct)}% Share · ${escapeHtml(c.track_count)} tracks · ${escapeHtml(metrics)}</div>
                     <ul class="cluster-mini-anchors">${anchors}</ul>
                     <div class="btn-row">
-                        <button class="btn btn-xs btn-primary expand-cluster-btn" data-cid="${escapeHtml(c.cluster_id)}" type="button">✨ Expand in Studio</button>
-                        <button class="btn btn-xs rename-cluster-btn" data-cid="${escapeHtml(c.cluster_id)}" data-label="${escapeHtml(c.vibe_label)}" type="button">✏️ Rename</button>
+                        <button class="btn btn-xs btn-primary expand-cluster-btn" data-cid="${escapeHtml(c.cluster_id)}" type="button">Expand in Studio</button>
+                        <button class="btn btn-xs rename-cluster-btn" data-cid="${escapeHtml(c.cluster_id)}" data-label="${escapeHtml(c.vibe_label)}" type="button">Rename</button>
                     </div>
                 </div>`;
             })
@@ -959,14 +961,14 @@
                 Plotly.newPlot(
                     "yearlyChartPlot",
                     [
-                        { x: yrs.map((r) => r.year), y: yrs.map((r) => r.hours), type: "bar", name: "Hours", marker: { color: "#1DB954" } },
-                        { x: yrs.map((r) => r.year), y: yrs.map((r) => r.avg_bpm), type: "scatter", mode: "lines+markers", name: "Avg BPM", yaxis: "y2", line: { color: "#00E5FF" } },
+                        { x: yrs.map((r) => r.year), y: yrs.map((r) => r.hours), type: "bar", name: "Hours", marker: { color: "#85858b" } },
+                        { x: yrs.map((r) => r.year), y: yrs.map((r) => r.avg_bpm), type: "scatter", mode: "lines+markers", name: "Avg BPM", yaxis: "y2", line: { color: "#e5a04b" } },
                     ],
                     {
-                        paper_bgcolor: "#171b2a",
-                        plot_bgcolor: "#10131e",
-                        font: { color: "#e6e9f2" },
-                        yaxis: { title: "Hours", gridcolor: "#272c40" },
+                        paper_bgcolor: "#19191b",
+                        plot_bgcolor: "#141415",
+                        font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
+                        yaxis: { title: "Hours", gridcolor: "rgba(237,237,237,0.08)" },
                         yaxis2: { title: "Avg BPM", overlaying: "y", side: "right" },
                         margin: { l: 45, r: 45, t: 20, b: 35 },
                         legend: { orientation: "h", y: -0.18 },
@@ -977,12 +979,12 @@
                 const hrs = data.hourly_distribution || [];
                 Plotly.newPlot(
                     "hourlyChartPlot",
-                    [{ x: hrs.map((h) => `${h.hour}:00`), y: hrs.map((h) => h.plays), type: "bar", marker: { color: "#B388FF" } }],
+                    [{ x: hrs.map((h) => `${h.hour}:00`), y: hrs.map((h) => h.plays), type: "bar", marker: { color: "rgba(229, 160, 75, 0.72)" } }],
                     {
-                        paper_bgcolor: "#171b2a",
-                        plot_bgcolor: "#10131e",
-                        font: { color: "#e6e9f2" },
-                        yaxis: { title: "Plays", gridcolor: "#272c40" },
+                        paper_bgcolor: "#19191b",
+                        plot_bgcolor: "#141415",
+                        font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
+                        yaxis: { title: "Plays", gridcolor: "rgba(237,237,237,0.08)" },
                         margin: { l: 45, r: 15, t: 20, b: 45 },
                     },
                     { responsive: true }
@@ -1235,7 +1237,7 @@
                 `<b>Detected Hardware:</b> ${escapeHtml(hw.cpu_name || hw.silicon || "CPU")} (${escapeHtml(hw.cpu_cores || "?")} threads) · ` +
                 `<b>${escapeHtml(ramTxt)}</b> · <b>NVIDIA GPU:</b> ${escapeHtml(nvTxt)} · ` +
                 `<b>OpenVINO Devices:</b> ${escapeHtml((hw.openvino_devices || ["CPU"]).join(", "))}<br>` +
-                `<span class="accent-text">✨ ${escapeHtml(hw.recommended_tier_label || "")}:</span> ${escapeHtml(hw.advice || "")}`;
+                `<span class="accent-text">${escapeHtml(hw.recommended_tier_label || "")}:</span> ${escapeHtml(hw.advice || "")}`;
         }
 
         const cardsEl = document.getElementById("llmTierCards");
@@ -1359,7 +1361,7 @@
             .map(
                 ([name, cfg]) => `
                 <span class="preset-chip">
-                    <button type="button" class="preset-apply-btn" data-name="${escapeHtml(name)}">🎛️ ${escapeHtml(name)}</button>
+                    <button type="button" class="preset-apply-btn" data-name="${escapeHtml(name)}">${escapeHtml(name)}</button>
                     ${cfg && cfg.builtin ? "" : `<button type="button" class="preset-del-btn" data-name="${escapeHtml(name)}" aria-label="Delete preset">×</button>`}
                 </span>`
             )
@@ -1472,7 +1474,7 @@
                           const canDedupe = g.playlist_id && SPOTIFY_ID_RE.test(String(g.playlist_id));
                           return `<div style="padding:6px 0; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:8px;">
                               <div><b>${escapeHtml(g.track_name)}</b> — ${escapeHtml(g.artist)}<div class="muted">${escapeHtml(g.playlist_name)} (${escapeHtml(g.duplicate_count)} copies)</div></div>
-                              ${canDedupe ? `<button class="btn btn-xs btn-danger dedupe-pl-btn" data-pid="${escapeHtml(g.playlist_id)}" data-pname="${escapeHtml(g.playlist_name)}" type="button">🧹 Dedupe Playlist</button>` : ""}
+                              ${canDedupe ? `<button class="btn btn-xs btn-danger dedupe-pl-btn" data-pid="${escapeHtml(g.playlist_id)}" data-pname="${escapeHtml(g.playlist_name)}" type="button">Dedupe playlist</button>` : ""}
                           </div>`;
                       })
                       .join("")
@@ -1489,7 +1491,7 @@
                 ? disliked
                       .map((r) => `<div style="padding:4px 0; border-bottom:1px solid var(--border);">${escapeHtml(r.name)} — ${escapeHtml(r.artist)} <span class="muted">(${escapeHtml(r.playlist_name)})</span></div>`)
                       .join("")
-                : `<div class="muted">No 👎 disliked tracks found in your synced playlists.</div>`;
+                : `<div class="muted">No disliked tracks found in your synced playlists</div>`;
 
             boxEl.innerHTML = `
                 <div class="card"><h3>Playlist Duplicates</h3><div class="mini-table-wrap mt-8">${dupHtml}</div></div>
@@ -1888,14 +1890,14 @@
                 showToast(err.message, "err");
             } finally {
                 btn.disabled = false;
-                btn.textContent = "✨ Generate Playlist";
+                btn.textContent = "Generate playlist";
             }
         });
 
         document.getElementById("btnContinuePlaying").addEventListener("click", async () => {
             const btn = document.getElementById("btnContinuePlaying");
             btn.disabled = true;
-            btn.textContent = "⏳ Reading Now Playing...";
+            btn.textContent = "Reading now playing...";
             try {
                 const res = await apiJson("/api/studio/continue-playing", {
                     method: "POST",
@@ -1914,7 +1916,7 @@
                 showToast(err.message, "err");
             } finally {
                 btn.disabled = false;
-                btn.textContent = "▶ Continue Playing Now";
+                btn.textContent = "Continue playing now";
             }
         });
 
@@ -1935,7 +1937,7 @@
             }
             const btn = document.getElementById("btnGenerateBridge");
             btn.disabled = true;
-            btn.textContent = "⏳ Building Vibe Bridge...";
+            btn.textContent = "Building vibe bridge...";
             try {
                 const res = await apiJson("/api/studio/vibe-bridge", {
                     method: "POST",
@@ -1953,7 +1955,7 @@
                 showToast(err.message, "err");
             } finally {
                 btn.disabled = false;
-                btn.textContent = "🌉 Build Vibe Bridge";
+                btn.textContent = "Build vibe bridge";
             }
         });
 
@@ -1987,7 +1989,7 @@
             }
             const btn = document.getElementById("btnGenerateBlend");
             btn.disabled = true;
-            btn.textContent = "⏳ Blending Tastes...";
+            btn.textContent = "Blending tastes...";
             try {
                 const ratio = parseInt(document.getElementById("blendRatio").value || "50", 10) / 100.0;
                 const res = await apiJson("/api/studio/taste-blend", {
@@ -2015,7 +2017,7 @@
                 showToast(err.message, "err");
             } finally {
                 btn.disabled = false;
-                btn.textContent = "🤝 Blend Tastes & Generate";
+                btn.textContent = "Blend tastes and generate";
             }
         });
 
