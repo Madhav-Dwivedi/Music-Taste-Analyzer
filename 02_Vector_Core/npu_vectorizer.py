@@ -293,18 +293,217 @@ def build_semantic_documents(profile):
             doc += f" | Content: {t['explicit']}"
         if t["genres"]:
             doc += f" | Genres: {t['genres']}"
-        if t["playlists"]:
-            doc += f" | Playlists: {t['playlists']}"
 
         af_text = format_audio_feature_text(af)
         if af_text:
             doc += f" | {af_text}"
 
+        # Keep playlist membership in metadata for soft co-occurrence, not raw text leakage
         t["doc_hash"] = hashlib.sha256(doc.encode("utf-8")).hexdigest()[:16]
         docs.append(doc)
         track_ids.append(tid)
 
     return docs, track_ids, unique_tracks
+
+
+def apply_soft_playlist_cooccurrence(embeddings, track_ids, metadata, weight=0.12, catchall_ratio=0.40):
+    """Gently blend track vectors toward curated (non-catch-all) playlist centroids."""
+    import numpy as np
+
+    mat = np.asarray(embeddings, dtype=np.float32).copy()
+    n_tracks = len(track_ids)
+    if n_tracks == 0 or len(mat) != n_tracks or weight <= 0.0:
+        return mat
+
+    w = float(max(0.0, min(0.5, weight)))
+    tid_to_idx = {str(tid): i for i, tid in enumerate(track_ids)}
+    playlist_members = {}
+    for tid in track_ids:
+        info = metadata.get(str(tid), {})
+        for pl_name in info.get("playlist_list") or []:
+            clean_pl = str(pl_name or "").strip()
+            if clean_pl:
+                playlist_members.setdefault(clean_pl, []).append(tid_to_idx[str(tid)])
+
+    max_members = max(2, int(n_tracks * float(catchall_ratio)))
+    playlist_centroids = {}
+    for pl_name, idxs in playlist_members.items():
+        if len(idxs) < 2 or len(idxs) > max_members:
+            continue
+        centroid = np.mean(mat[idxs], axis=0)
+        norm = float(np.linalg.norm(centroid))
+        if norm > 1e-8:
+            playlist_centroids[pl_name] = centroid / norm
+
+    if not playlist_centroids:
+        return mat
+
+    for i, tid in enumerate(track_ids):
+        info = metadata.get(str(tid), {})
+        member_vecs = [
+            playlist_centroids[str(pl).strip()]
+            for pl in (info.get("playlist_list") or [])
+            if str(pl).strip() in playlist_centroids
+        ]
+        if not member_vecs:
+            continue
+        pl_pull = np.mean(member_vecs, axis=0)
+        p_norm = float(np.linalg.norm(pl_pull))
+        if p_norm > 1e-8:
+            pl_pull = pl_pull / p_norm
+        blended = ((1.0 - w) * mat[i]) + (w * pl_pull)
+        b_norm = float(np.linalg.norm(blended))
+        if b_norm > 1e-8:
+            mat[i] = blended / b_norm
+
+    return mat
+
+
+def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
+    """Enrich missing audio/DSP telemetry from Deezer 30s previews and embed via CLAP."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import numpy as np
+
+    stage1_dir = os.path.join(ROOT_DIR, "01_Data_Extractor")
+    if stage1_dir not in sys.path:
+        sys.path.insert(0, stage1_dir)
+
+    import deezer_audio_client as dz
+    from clap_embedder import CLAP_DIM, embed_audio_waveform, embed_texts_clap, get_clap_model, tag_audio_embeddings
+
+    deezer_cache = dz.load_deezer_cache()
+    dsp_cache = dz.load_dsp_cache()
+    cache_lock = threading.Lock()
+
+    processor, model, device = get_clap_model()
+    print(f"\n[3/4] Fetching Deezer 30s previews & running CLAP + DSP on {len(to_embed_indices)} tracks...")
+
+    audio_vectors = {}
+    audio_indices = []
+    text_fallback_indices = []
+
+    def _fetch_track_audio(orig_idx):
+        tid = track_ids[orig_idx]
+        info = metadata[tid]
+        name = info.get("name", "")
+        artist = info.get("artists", "")
+        fp = get_track_fingerprint(name, artist)
+
+        with cache_lock:
+            cached_dz = deezer_cache.get(fp)
+        if cached_dz is None:
+            cached_dz = dz.search_deezer_track(name, artist, cache=None)
+            with cache_lock:
+                deezer_cache[fp] = cached_dz
+
+        wav = None
+        if cached_dz.get("found"):
+            wav, fresh_url = dz.download_preview_waveform(
+                cached_dz.get("preview_url", ""),
+                deezer_id=cached_dz.get("deezer_id"),
+                target_sr=48000,
+            )
+            if fresh_url and fresh_url != cached_dz.get("preview_url"):
+                with cache_lock:
+                    cached_dz = dict(cached_dz, preview_url=fresh_url)
+                    deezer_cache[fp] = cached_dz
+
+        dsp_af = None
+        with cache_lock:
+            cached_dsp = dsp_cache.get(fp)
+        if is_real_audio_features(cached_dsp):
+            dsp_af = cached_dsp
+        elif wav is not None:
+            try:
+                dsp_af = dz.extract_dsp_audio_features(wav, sr=48000, deezer_bpm=cached_dz.get("bpm"))
+                with cache_lock:
+                    dsp_cache[fp] = dsp_af
+            except Exception:
+                dsp_af = None
+
+        return orig_idx, cached_dz, wav, dsp_af
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(_fetch_track_audio, orig_idx) for orig_idx in to_embed_indices]
+        done_cnt = 0
+        total_cnt = len(to_embed_indices)
+        for fut in as_completed(futures):
+            done_cnt += 1
+            orig_idx, dz_info, wav, dsp_af = fut.result()
+            tid = track_ids[orig_idx]
+            info = metadata[tid]
+
+            if dz_info.get("found"):
+                rel_date = str(dz_info.get("release_date") or "")[:4]
+                if not info.get("year") and rel_date.isdigit():
+                    info["year"] = rel_date
+
+            if not is_real_audio_features(info.get("audio_features")) and is_real_audio_features(dsp_af):
+                info["audio_features"] = dsp_af
+
+            if wav is not None:
+                try:
+                    vec = embed_audio_waveform(wav, processor, model, device=device, max_windows=3, sr=48000)
+                    audio_vectors[orig_idx] = vec
+                    audio_indices.append(orig_idx)
+                    info["embed_source"] = "clap_audio"
+                except Exception:
+                    text_fallback_indices.append(orig_idx)
+            else:
+                text_fallback_indices.append(orig_idx)
+
+            if done_cnt % 50 == 0 or done_cnt == total_cnt:
+                print(
+                    f"      ... processed {done_cnt}/{total_cnt} tracks "
+                    f"(audio: {len(audio_indices)}, text fallback: {len(text_fallback_indices)})",
+                    flush=True,
+                )
+
+    dz.save_deezer_cache(deezer_cache)
+    dz.save_dsp_cache(dsp_cache)
+
+    # Zero-shot tag tracks missing genres using CLAP audio vectors
+    if audio_indices:
+        need_tag_idx = [i for i in audio_indices if not (metadata[track_ids[i]].get("genres") or "").strip()]
+        if need_tag_idx:
+            mat = np.vstack([audio_vectors[i] for i in need_tag_idx])
+            tag_lists = tag_audio_embeddings(mat, processor, model, device=device, top_k=3)
+            for idx_pos, orig_idx in enumerate(need_tag_idx):
+                metadata[track_ids[orig_idx]]["genres"] = ", ".join(tag_lists[idx_pos])
+
+    # Embed tracks without previews using CLAP text encoder in the same 512-D space
+    text_vectors = {}
+    if text_fallback_indices:
+        fallback_docs = []
+        for orig_idx in text_fallback_indices:
+            info = metadata[track_ids[orig_idx]]
+            af_text = format_audio_feature_text(info.get("audio_features") or {})
+            doc = f"Track: {info['name']} | Artist: {info['artists']}"
+            if info.get("year"):
+                doc += f" | Year: {info['year']}"
+            if info.get("genres"):
+                doc += f" | Genres: {info['genres']}"
+            if af_text:
+                doc += f" | {af_text}"
+            fallback_docs.append(doc)
+        t_mat = embed_texts_clap(fallback_docs, processor, model, device=device)
+        if audio_vectors and len(t_mat) > 0:
+            audio_mat = np.vstack(list(audio_vectors.values()))
+            delta = np.mean(audio_mat, axis=0) - np.mean(t_mat, axis=0)
+            shifted = t_mat + delta
+            norms = np.linalg.norm(shifted, axis=1, keepdims=True)
+            norms = np.where(norms > 1e-8, norms, 1.0)
+            t_mat = (shifted / norms).astype(np.float32)
+            print(f"      🌉 Bridged CLAP modality gap for {len(text_fallback_indices)} text-fallback tracks.")
+        for pos, orig_idx in enumerate(text_fallback_indices):
+            text_vectors[orig_idx] = t_mat[pos]
+            metadata[track_ids[orig_idx]]["embed_source"] = "clap_text"
+
+    result_vecs = {}
+    result_vecs.update(audio_vectors)
+    result_vecs.update(text_vectors)
+    return result_vecs, CLAP_DIM
 
 
 def main():
@@ -317,15 +516,28 @@ def main():
         default=None,
         help="Music provider profile to vectorize (default: active preference)",
     )
+    parser.add_argument(
+        "--backend",
+        choices=["auto", "clap", "minilm"],
+        default="auto",
+        help="Embedding backend: clap (audio+text 512-D) or minilm (OpenVINO text 384-D)",
+    )
     args = parser.parse_args()
 
     import numpy as np
 
+    prefs = get_effective_preferences()
+    backend = prefs.get("embed_backend", "minilm") if args.backend == "auto" else args.backend
+    if backend not in ("clap", "minilm"):
+        backend = "minilm"
+    coocc_weight = float(prefs.get("playlist_cooccurrence_weight", 0.12))
+    catchall_ratio = float(getattr(config, "CATCHALL_PLAYLIST_RATIO", 0.40))
+
     print("==================================================")
-    print(" NPU Music Taste Analyzer - Stage 2 Vectorizer (OpenVINO)")
+    print(f" Music Taste Analyzer - Stage 2 Vectorizer ({backend.upper()})")
     print("==================================================")
 
-    eff_provider = args.provider or get_effective_preferences().get("active_provider", "spotify")
+    eff_provider = args.provider or prefs.get("active_provider", "spotify")
     stage1_dir = os.path.join(ROOT_DIR, "01_Data_Extractor")
     profile = load_merged_music_profile(stage1_dir=stage1_dir, provider=eff_provider)
     if not isinstance(profile, dict):
@@ -334,29 +546,40 @@ def main():
         sys.exit(1)
 
     docs, track_ids, metadata = build_semantic_documents(profile)
-    print(f"      🎵 Prepared {len(docs)} unique semantic track documents.")
+    print(f"      🎵 Prepared {len(docs)} unique track records.")
     if not docs:
         print("❌ Error: No tracks available to vectorize. Check Stage 1 output.")
         sys.exit(1)
+
+    clap_id = getattr(config, "CLAP_MODEL_ID", "laion/clap-htsat-unfused") if backend == "clap" else ""
+    for tid in track_ids:
+        metadata[tid]["embed_backend"] = backend
+        metadata[tid]["doc_hash"] = hashlib.sha256(
+            f"{backend}:{clap_id}::{metadata[tid]['doc_hash']}".encode("utf-8")
+        ).hexdigest()[:16]
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     npz_path = os.path.join(base_dir, "taste_vectors.npz")
     meta_path = os.path.join(base_dir, "track_metadata.json")
 
     cached_vectors = {}
-    expected_dim = None
+    expected_dim = 512 if backend == "clap" else 384
     if not args.force and os.path.exists(npz_path) and os.path.exists(meta_path):
         try:
             with np.load(npz_path) as old_data:
                 old_embs = np.array(old_data["embeddings"])
                 old_tids = [str(t) for t in old_data["track_ids"]]
+                old_backend = (
+                    str(old_data["embed_backend"])
+                    if "embed_backend" in old_data
+                    else ("clap" if old_embs.shape[1] == 512 else "minilm")
+                )
             old_meta = load_json_safe(meta_path, default={}) or {}
-            if len(old_embs) == len(old_tids) and len(old_embs) > 0:
-                expected_dim = old_embs.shape[1]
+            if old_backend == backend and len(old_embs) == len(old_tids) and len(old_embs) > 0 and old_embs.shape[1] == expected_dim:
                 for idx, old_tid in enumerate(old_tids):
                     old_hash = (old_meta.get(old_tid) or {}).get("doc_hash")
                     if old_hash:
-                        cached_vectors[old_tid] = (old_hash, old_embs[idx])
+                        cached_vectors[old_tid] = (old_hash, old_embs[idx], old_meta.get(old_tid) or {})
         except Exception as e:
             print(f"      ⚠️ Could not read previous vector cache ({e}); re-embedding all tracks.")
             cached_vectors = {}
@@ -368,8 +591,15 @@ def main():
     for idx, tid in enumerate(track_ids):
         cur_hash = metadata[tid]["doc_hash"]
         cached = cached_vectors.get(tid)
-        if cached and cached[0] == cur_hash and (expected_dim is None or len(cached[1]) == expected_dim):
+        if cached and cached[0] == cur_hash and len(cached[1]) == expected_dim:
             final_rows[idx] = cached[1]
+            prev_info = cached[2]
+            if not is_real_audio_features(metadata[tid].get("audio_features")) and is_real_audio_features(prev_info.get("audio_features")):
+                metadata[tid]["audio_features"] = prev_info["audio_features"]
+            if not (metadata[tid].get("genres") or "").strip() and (prev_info.get("genres") or "").strip():
+                metadata[tid]["genres"] = prev_info["genres"]
+            if prev_info.get("embed_source"):
+                metadata[tid]["embed_source"] = prev_info["embed_source"]
             reused_count += 1
         else:
             to_embed_indices.append(idx)
@@ -378,51 +608,66 @@ def main():
         print(f"      ⚡ Incremental Cache: Reused {reused_count} unchanged track vectors ({len(to_embed_indices)} new/updated).")
 
     if to_embed_indices:
-        import torch
+        if backend == "clap":
+            clap_vecs, _ = _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata)
+            for orig_idx, vec in clap_vecs.items():
+                final_rows[orig_idx] = vec
+        else:
+            import torch
 
-        tokenizer, model = get_openvino_model()
-        print(f"\n[3/4] Vectorizing {len(to_embed_indices)} tracks via Intel OpenVINO Engine...")
-        is_static = getattr(model, "is_static_npu", False)
-        batch_size = 1 if is_static else 16
-        embedded_chunks = []
-        to_embed_docs = [docs[i] for i in to_embed_indices]
+            tokenizer, model = get_openvino_model()
+            print(f"\n[3/4] Vectorizing {len(to_embed_indices)} tracks via Intel OpenVINO Engine...")
+            is_static = getattr(model, "is_static_npu", False)
+            batch_size = 1 if is_static else 16
+            embedded_chunks = []
+            to_embed_docs = [docs[i] for i in to_embed_indices]
 
-        with torch.no_grad():
-            for i in range(0, len(to_embed_docs), batch_size):
-                batch = to_embed_docs[i : i + batch_size]
+            with torch.no_grad():
+                for i in range(0, len(to_embed_docs), batch_size):
+                    batch = to_embed_docs[i : i + batch_size]
 
-                if is_static:
-                    encoded_input = tokenizer(
-                        batch,
-                        padding="max_length",
-                        max_length=128,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
-                else:
-                    encoded_input = tokenizer(
-                        batch,
-                        padding=True,
-                        max_length=256,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
+                    if is_static:
+                        encoded_input = tokenizer(
+                            batch,
+                            padding="max_length",
+                            max_length=128,
+                            truncation=True,
+                            return_tensors="pt",
+                        )
+                    else:
+                        encoded_input = tokenizer(
+                            batch,
+                            padding=True,
+                            max_length=256,
+                            truncation=True,
+                            return_tensors="pt",
+                        )
 
-                model_output = model(**encoded_input)
-                sentence_embeddings = mean_pooling(model_output, encoded_input["attention_mask"])
-                sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
-                embedded_chunks.append(sentence_embeddings.detach().cpu().numpy())
+                    model_output = model(**encoded_input)
+                    sentence_embeddings = mean_pooling(model_output, encoded_input["attention_mask"])
+                    sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
+                    embedded_chunks.append(sentence_embeddings.detach().cpu().numpy())
 
-                if (i > 0 and i % 160 == 0) or (i + batch_size >= len(to_embed_docs)):
-                    print(f"      ... embedded {min(i + batch_size, len(to_embed_docs))} / {len(to_embed_docs)} tracks")
+                    if (i > 0 and i % 160 == 0) or (i + batch_size >= len(to_embed_docs)):
+                        print(f"      ... embedded {min(i + batch_size, len(to_embed_docs))} / {len(to_embed_docs)} tracks")
 
-        new_matrix = np.vstack(embedded_chunks)
-        for pos, orig_idx in enumerate(to_embed_indices):
-            final_rows[orig_idx] = new_matrix[pos]
+            new_matrix = np.vstack(embedded_chunks)
+            for pos, orig_idx in enumerate(to_embed_indices):
+                final_rows[orig_idx] = new_matrix[pos]
+                metadata[track_ids[orig_idx]]["embed_source"] = "minilm_text"
     else:
-        print("\n[3/4] ⚡ All track documents unchanged — skipping OpenVINO inference!")
+        print(f"\n[3/4] ⚡ All track vectors unchanged — skipping {backend.upper()} inference!")
 
     embeddings_matrix = np.vstack(final_rows)
+    if coocc_weight > 0.0:
+        print(f"      🎚️ Blending soft playlist co-occurrence (weight={coocc_weight:.2f}, catch-all>{int(catchall_ratio*100)}%)...")
+        embeddings_matrix = apply_soft_playlist_cooccurrence(
+            embeddings_matrix,
+            track_ids,
+            metadata,
+            weight=coocc_weight,
+            catchall_ratio=catchall_ratio,
+        )
 
     print("\n[4/4] Generating Output Artifacts...")
     print(f"      ✅ Generated Taste Vector Matrix of shape: {embeddings_matrix.shape}")
@@ -430,7 +675,12 @@ def main():
     npz_tmp = f"{npz_path}.{os.getpid()}.tmp"
     try:
         with open(npz_tmp, "wb") as f:
-            np.savez(f, embeddings=embeddings_matrix, track_ids=np.array(track_ids))
+            np.savez(
+                f,
+                embeddings=embeddings_matrix,
+                track_ids=np.array(track_ids),
+                embed_backend=np.array(backend),
+            )
             f.flush()
             os.fsync(f.fileno())
         for attempt in range(5):
@@ -452,7 +702,7 @@ def main():
     atomic_write_json(meta_path, metadata, indent=2)
 
     print("      ✅ Saved 'taste_vectors.npz' and 'track_metadata.json'")
-    print("\n🚀 NPU Vectorizer Complete! You are ready for the Clustering Engine.")
+    print("\n🚀 Vectorizer Complete! You are ready for the Clustering Engine.")
 
 
 if __name__ == "__main__":

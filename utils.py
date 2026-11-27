@@ -679,6 +679,8 @@ def get_effective_preferences():
         "default_public_export": False,
         "sync_likes_to_spotify": False,
         "active_provider": getattr(config, "DEFAULT_ACTIVE_PROVIDER", "spotify"),
+        "embed_backend": getattr(config, "DEFAULT_EMBED_BACKEND", "minilm"),
+        "playlist_cooccurrence_weight": float(getattr(config, "DEFAULT_PLAYLIST_COOCCURRENCE_WEIGHT", 0.12)),
         "llm_backend": "openvino",
         "llm_model_key": "auto",
         "llm_device": "auto",
@@ -719,6 +721,12 @@ def get_effective_preferences():
         prefs["sync_likes_to_spotify"] = raw["sync_likes_to_spotify"]
     if str(raw.get("active_provider") or "").strip().lower() in ("spotify", "ytmusic", "unified"):
         prefs["active_provider"] = str(raw["active_provider"]).strip().lower()
+    if str(raw.get("embed_backend") or "").strip().lower() in ("minilm", "clap"):
+        prefs["embed_backend"] = str(raw["embed_backend"]).strip().lower()
+    if "playlist_cooccurrence_weight" in raw:
+        prefs["playlist_cooccurrence_weight"] = _clamp_pref_float(
+            raw.get("playlist_cooccurrence_weight"), 0.0, 0.35, prefs["playlist_cooccurrence_weight"]
+        )
     if str(raw.get("llm_backend") or "").strip().lower() in ("openvino", "ollama", "openai_local"):
         prefs["llm_backend"] = str(raw["llm_backend"]).strip().lower()
     mkey = str(raw.get("llm_model_key") or "").strip()
@@ -786,6 +794,14 @@ def save_user_preferences(updates):
             prov = str(updates["active_provider"] or "").strip().lower()
             if prov in ("spotify", "ytmusic", "unified"):
                 current["active_provider"] = prov
+        if "embed_backend" in updates:
+            eb = str(updates["embed_backend"] or "").strip().lower()
+            if eb in ("minilm", "clap"):
+                current["embed_backend"] = eb
+        if "playlist_cooccurrence_weight" in updates:
+            current["playlist_cooccurrence_weight"] = _clamp_pref_float(
+                updates["playlist_cooccurrence_weight"], 0.0, 0.35, current["playlist_cooccurrence_weight"]
+            )
         if "llm_backend" in updates:
             lb = str(updates["llm_backend"] or "").strip().lower()
             if lb in ("openvino", "ollama", "openai_local"):

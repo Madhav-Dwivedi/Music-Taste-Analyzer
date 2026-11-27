@@ -110,6 +110,8 @@ def fetch_ytm_data(ytm):
 
     try:
         print("      -> Fetching Personal Playlists...")
+        excl_raw = load_json_safe(os.path.join(ROOT_DIR, "ytm_excluded_playlists.json"), default=[])
+        excluded_set = {str(x).strip().lower() for x in (excl_raw or []) if str(x).strip()}
         raw_pls = list(ytm.get_library_playlists(limit=50) or [])
         for pl in raw_pls:
             if not isinstance(pl, dict):
@@ -118,6 +120,9 @@ def fetch_ytm_data(ytm):
             if not pid or pid in ("LM", "SE"):
                 continue
             pl_title = pl.get("title") or "Untitled Playlist"
+            if pl_title.strip().lower() in excluded_set or str(pid).strip().lower() in excluded_set:
+                print(f"         * Skipping excluded YTM playlist: '{pl_title}'")
+                continue
             try:
                 full_pl = ytm.get_playlist(pid, limit=500) or {}
                 tracks = list(full_pl.get("tracks") or [])

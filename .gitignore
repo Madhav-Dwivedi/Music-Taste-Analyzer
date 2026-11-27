@@ -29,9 +29,12 @@ Thumbs.db
 .cache/
 01_Data_Extractor/.cache
 01_Data_Extractor/.reccobeats_cache.json
+01_Data_Extractor/deezer_cache.json
+01_Data_Extractor/audio_dsp_cache.json
 ytm_browser.json
 ytm_oauth.json
 .ytm_oauth_client.json
+ytm_excluded_playlists.json
 user_preferences.json
 user_feedback.json
 web_ui/vendor/

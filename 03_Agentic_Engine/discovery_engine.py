@@ -88,13 +88,40 @@ def get_master_centroid():
     return np.array(summary["master_taste_centroid"], dtype=float)
 
 
+def get_vectors_backend():
+    """Detect whether Stage 2 vectors use 'clap' (512-D) or 'minilm' (384-D)."""
+    import numpy as np
+
+    npz_path = os.path.join(STAGE2_DIR, "taste_vectors.npz")
+    if os.path.exists(npz_path):
+        try:
+            with np.load(npz_path) as data:
+                if "embed_backend" in data:
+                    val = str(data["embed_backend"])
+                    if val in ("clap", "minilm"):
+                        return val
+                embs = data["embeddings"]
+                if len(embs.shape) == 2 and embs.shape[1] == 512:
+                    return "clap"
+                return "minilm"
+        except Exception:
+            pass
+    return get_effective_preferences().get("embed_backend", "minilm")
+
+
 def embed_texts(texts, tokenizer, model):
     import numpy as np
     import torch
     from npu_vectorizer import mean_pooling
 
+    is_clap = bool(getattr(model, "is_clap", False))
     if not texts:
-        return np.empty((0, 384), dtype=float)
+        return np.empty((0, 512 if is_clap else 384), dtype=float)
+
+    if is_clap:
+        from clap_embedder import embed_texts_clap
+
+        return embed_texts_clap(texts, tokenizer, model, device=getattr(model, "_clap_device", None))
 
     with torch.no_grad():
         if getattr(model, "is_static_npu", False):
@@ -784,9 +811,23 @@ class WarmDiscoverySession:
         from npu_vectorizer import get_openvino_model
 
         with self._lock:
-            if self.embed_model is None or self.embed_tokenizer is None:
-                self._log("[WarmSession] Loading MiniLM Embedding Engine...", log_cb)
-                self.embed_tokenizer, self.embed_model = get_openvino_model()
+            target_backend = get_vectors_backend()
+            cur_is_clap = bool(getattr(self.embed_model, "is_clap", False)) if self.embed_model is not None else None
+            need_reload_embedder = (
+                self.embed_model is None
+                or self.embed_tokenizer is None
+                or (target_backend == "clap" and not cur_is_clap)
+                or (target_backend != "clap" and cur_is_clap)
+            )
+            if need_reload_embedder:
+                if target_backend == "clap":
+                    from clap_embedder import get_clap_model
+
+                    self._log("[WarmSession] Loading CLAP (512-D) Audio+Text Embedding Engine...", log_cb)
+                    self.embed_tokenizer, self.embed_model, _ = get_clap_model()
+                else:
+                    self._log("[WarmSession] Loading MiniLM Embedding Engine...", log_cb)
+                    self.embed_tokenizer, self.embed_model = get_openvino_model()
 
             cur_sig = self._current_llm_pref_sig()
             if load_llm and (self.pipe is None or self.llm_config_sig != cur_sig):

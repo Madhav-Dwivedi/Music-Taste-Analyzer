@@ -12,3 +12,6 @@ huggingface-hub
 hf_xet
 psutil
 plotly
+librosa
+soundfile
+av

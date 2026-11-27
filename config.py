@@ -128,9 +128,13 @@ OLLAMA_RECOMMENDED_TIERS = [
     {"tier": 4, "min_vram_gb": 10.0, "model": "qwen3:14b", "label": "14B Enthusiast (32GB+ RAM / 12GB+ VRAM)"},
 ]
 
-# 2. The Vector Embedding Model (Sentence Transformers)
+# 2. The Vector Embedding Model (CLAP Audio+Text & OpenVINO MiniLM)
 EMBED_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
 EMBED_MODEL_DIR = os.path.join(BASE_DIR, "02_Vector_Core", "embed_ov_model")
+CLAP_MODEL_ID = "laion/clap-htsat-unfused"
+DEFAULT_EMBED_BACKEND = "minilm"
+DEFAULT_PLAYLIST_COOCCURRENCE_WEIGHT = 0.12
+CATCHALL_PLAYLIST_RATIO = 0.40
 
 # =======================================================
 # SPOTIFY API CONFIGURATION
@@ -157,7 +161,7 @@ RECCOBEATS_BATCH_SIZE = 40
 RECCOBEATS_NOT_FOUND_TTL_DAYS = 14
 EXTENDED_HISTORY_HALF_LIFE_DAYS = 120.0
 MIN_CLUSTERS = 3
-MAX_CLUSTERS = 7
+MAX_CLUSTERS = 10
 
 # Optional per-artist clustering weight multipliers (exact artist names, case-insensitive).
 # You can also define {"penalized_artists": {"Artist Name": 0.05}} in user_preferences.json.
