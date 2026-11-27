@@ -148,6 +148,91 @@ class TestClapAndEnrichment(unittest.TestCase):
             slice_labels = labels[cid * n_per : (cid + 1) * n_per]
             self.assertEqual(len(set(slice_labels.tolist())), 1)
 
+    def test_name_clusters_with_ollama_updates_labels(self):
+        clusters = [
+            {
+                "cluster_id": 0,
+                "vibe_label": "Old Label 0",
+                "auto_vibe_label": "Old Label 0",
+                "top_genres": ["Classical"],
+                "track_count": 20,
+                "anchor_tracks": [{"name": "Merry-Go-Round", "artist": "Joe Hisaishi"}],
+                "telemetry": {"avg_bpm": 130.0, "avg_energy": 0.46, "avg_valence": 0.37},
+            },
+            {
+                "cluster_id": 1,
+                "vibe_label": "Old Label 1",
+                "auto_vibe_label": "Old Label 1",
+                "top_genres": ["Vocal Jazz"],
+                "track_count": 100,
+                "anchor_tracks": [{"name": "Fly Me To The Moon", "artist": "Frank Sinatra"}],
+                "telemetry": {"avg_bpm": 120.0, "avg_energy": 0.65, "avg_valence": 0.52},
+            },
+        ]
+        fake_resp = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "message": {
+                    "content": '{"0": "Orchestral & Film Scores", "1": "Vintage Vocal Jazz"}'
+                }
+            },
+        )
+        prefs = {
+            "llm_backend": "ollama",
+            "ollama_url": "http://127.0.0.1:11434",
+            "ollama_model": "qwen3.5:9b",
+        }
+        with patch("requests.post", return_value=fake_resp) as mock_post:
+            ok = taste_clusterer.name_clusters_with_ollama(
+                clusters, prefs=prefs, custom_labels={"1": "Pinned Jazz"}
+            )
+            mock_post.assert_called_once()
+        self.assertTrue(ok)
+        self.assertEqual(clusters[0]["vibe_label"], "Orchestral & Film Scores")
+        self.assertEqual(clusters[1]["auto_vibe_label"], "Vintage Vocal Jazz")
+        self.assertEqual(clusters[1]["vibe_label"], "Pinned Jazz")
+
+    def test_deezer_build_search_candidates_cleans_ytm_noise(self):
+        anri_cands = dz._build_search_candidates(
+            "悲しみがとまらない\u3000I CAN'T STOP THE LONELINESS - Kanashimi ga Tomaranai I CAN'T STOP THE LONELINESS",
+            "Anri",
+        )
+        titles_only = [t.lower() for t, _ in anri_cands]
+        self.assertTrue(any("can't stop the loneliness" in t and "悲しみ" not in t for t in titles_only))
+        self.assertTrue(all(a == "Anri" for _, a in anri_cands if a))
+
+        reupload_cands = dz._build_search_candidates(
+            "The Handsome Family - Far From Any Road [Official HD Video] | HBO",
+            "Beatriz, 1.2M views",
+        )
+        self.assertIn(("Far From Any Road", "The Handsome Family"), reupload_cands)
+
+    def test_fit_gmm_clusters_splits_oversized_cluster_and_handles_anisotropy(self):
+        rng = np.random.RandomState(11)
+        dim = 64
+        # Inject strong shared cone offset + 5 modes where 1 super-mode has two distinct sub-pockets (50% total)
+        cone = np.ones(dim, dtype=float) / np.sqrt(dim) * 3.0
+        sub_a = np.eye(6, dim, dtype=float)[0] * 0.6 + cone
+        sub_b = np.eye(6, dim, dtype=float)[1] * 0.6 + cone
+        other_modes = [np.eye(6, dim, dtype=float)[k] * 0.7 + cone for k in range(2, 6)]
+
+        pts = []
+        for center, count in [(sub_a, 40), (sub_b, 40)] + [(m, 20) for m in other_modes]:
+            block = center + rng.normal(0.0, 0.02, size=(count, dim))
+            block /= np.linalg.norm(block, axis=1, keepdims=True)
+            pts.append(block)
+
+        embs = np.vstack(pts)
+        weights = np.ones(len(embs), dtype=float)
+        labels, centers, _, _ = taste_clusterer.fit_gmm_clusters(
+            embs, weights, min_k=3, max_k=5, pca_dims=12, max_cluster_share=0.22
+        )
+        # Giant 50% cluster splits so final cluster count >= 5 and max share <= 0.30
+        unique_cnt = len(set(labels.tolist()))
+        self.assertGreaterEqual(unique_cnt, 5)
+        counts = np.bincount(labels)
+        self.assertLessEqual(counts.max() / float(len(embs)), 0.30)
+
 
 if __name__ == "__main__":
     unittest.main()

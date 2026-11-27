@@ -309,22 +309,30 @@ def choose_optimal_k(embeddings, weights, min_k=3, max_k=7):
 
 
 def _reduce_for_clustering(embeddings, max_dims=20):
-    """Compress high-D vectors with PCA before fitting GMM to avoid covariance overfitting."""
+    """Mean-center, compress with PCA, and L2-normalize before GMM to remove CLAP cone anisotropy."""
     import numpy as np
     from sklearn.decomposition import PCA
 
     mat = np.asarray(embeddings, dtype=float)
     n_samples, dim = mat.shape
+    if n_samples >= 3:
+        mat = mat - np.mean(mat, axis=0, keepdims=True)
     if dim <= max_dims or n_samples <= max_dims + 2:
-        return mat
-    n_comp = min(int(max_dims), n_samples - 1, dim)
-    pca = PCA(n_components=n_comp, random_state=42)
-    return pca.fit_transform(mat)
+        reduced = mat
+    else:
+        n_comp = min(int(max_dims), n_samples - 1, dim)
+        pca = PCA(n_components=n_comp, random_state=42)
+        reduced = pca.fit_transform(mat)
+
+    norms = np.linalg.norm(reduced, axis=1, keepdims=True)
+    norms = np.where(norms > 1e-9, norms, 1.0)
+    return reduced / norms
 
 
-def fit_gmm_clusters(embeddings, weights, min_k=3, max_k=10, fixed_k=None, pca_dims=20):
-    """Fit diagonal Gaussian Mixture Models on PCA-compressed vectors, selecting k via lowest BIC."""
+def fit_gmm_clusters(embeddings, weights, min_k=3, max_k=14, fixed_k=None, pca_dims=20, max_cluster_share=0.22):
+    """Fit diagonal Gaussian Mixture Models on centered PCA vectors, split bloated clusters, and tighten bounds."""
     import numpy as np
+    from sklearn.metrics.pairwise import cosine_similarity
     from sklearn.mixture import GaussianMixture
 
     mat = np.asarray(embeddings, dtype=float)
@@ -339,6 +347,15 @@ def fit_gmm_clusters(embeddings, weights, min_k=3, max_k=10, fixed_k=None, pca_d
         if c_norm > 0:
             center = center / c_norm
         return np.zeros(n_samples, dtype=int), np.array([center]), np.ones((n_samples, 1), dtype=float), {}
+
+    # Mean-centered full-D unit vectors prevent isotropic hubs from swallowing fringe tracks
+    if n_samples >= 3:
+        mat_centered = mat - np.mean(mat, axis=0, keepdims=True)
+    else:
+        mat_centered = mat.copy()
+    c_norms = np.linalg.norm(mat_centered, axis=1, keepdims=True)
+    c_norms = np.where(c_norms > 1e-9, c_norms, 1.0)
+    mat_centered = mat_centered / c_norms
 
     x_pca = _reduce_for_clustering(mat, max_dims=pca_dims)
     k_low = max(2, min(int(min_k), n_samples - 1))
@@ -393,21 +410,77 @@ def fit_gmm_clusters(embeddings, weights, min_k=3, max_k=10, fixed_k=None, pca_d
     labels = np.argmax(probs, axis=1)
     n_comp = probs.shape[1]
 
-    centers = []
+    # Split abnormally oversized clusters (e.g. >22% of library when k is already high)
+    if fixed_k is None and n_samples >= 80 and float(max_cluster_share or 0.0) > 0.0:
+        for _ in range(2):
+            counts = np.bincount(labels, minlength=n_comp)
+            biggest = int(np.argmax(counts))
+            share_limit = max(float(max_cluster_share), 1.6 / max(1, n_comp))
+            if (counts[biggest] / float(n_samples)) <= share_limit or n_comp >= k_high + 2:
+                break
+            mask = labels == biggest
+            sub_x = x_pca[mask]
+            if len(sub_x) < max(2 * min_cluster_size, 8):
+                break
+            sub_gmm = GaussianMixture(
+                n_components=2,
+                covariance_type="diag",
+                reg_covar=1e-4,
+                n_init=5,
+                random_state=42,
+            ).fit(sub_x)
+            sub_probs = sub_gmm.predict_proba(sub_x)
+            sub_labels = np.argmax(sub_probs, axis=1)
+            if int(np.sum(sub_labels == 0)) < min_cluster_size or int(np.sum(sub_labels == 1)) < min_cluster_size:
+                break
+
+            new_cid = n_comp
+            new_probs = np.zeros((n_samples, n_comp + 1), dtype=float)
+            new_probs[:, :n_comp] = probs
+            parent_p = probs[mask, biggest]
+            new_probs[mask, biggest] = parent_p * sub_probs[:, 0]
+            new_probs[mask, new_cid] = parent_p * sub_probs[:, 1]
+            probs = new_probs
+            labels[mask] = np.where(sub_labels == 0, biggest, new_cid)
+            n_comp += 1
+
+    c_centers = []
     for c in range(n_comp):
         soft_w = w_arr * probs[:, c]
         if float(soft_w.sum()) <= 1e-9:
             soft_w = probs[:, c]
         if float(soft_w.sum()) <= 1e-9:
-            c_vec = np.mean(mat, axis=0)
+            c_vec = np.mean(mat_centered, axis=0)
         else:
-            c_vec = np.average(mat, axis=0, weights=soft_w)
+            c_vec = np.average(mat_centered, axis=0, weights=soft_w)
         c_norm = float(np.linalg.norm(c_vec))
         if c_norm > 0:
             c_vec = c_vec / c_norm
-        centers.append(c_vec)
+        c_centers.append(c_vec)
+    c_centers_mat = np.vstack(c_centers)
 
-    return labels, np.vstack(centers), probs, bic_scores
+    # Tighten cluster bounds in mean-centered full-D cosine space
+    sims = cosine_similarity(mat_centered, c_centers_mat)
+    for i in range(len(labels)):
+        best_c = int(np.argmax(sims[i]))
+        if sims[i, best_c] > sims[i, labels[i]] + 0.03:
+            labels[i] = best_c
+
+    final_centers = []
+    for c in range(n_comp):
+        mask = labels == c
+        if np.any(mask):
+            cw = w_arr[mask]
+            c_vec = np.average(mat[mask], axis=0, weights=cw) if float(cw.sum()) > 1e-9 else np.mean(mat[mask], axis=0)
+        else:
+            pw = w_arr * probs[:, c]
+            c_vec = np.average(mat, axis=0, weights=pw) if float(pw.sum()) > 1e-9 else np.mean(mat, axis=0)
+        c_norm = float(np.linalg.norm(c_vec))
+        if c_norm > 0:
+            c_vec = c_vec / c_norm
+        final_centers.append(c_vec)
+
+    return labels, np.vstack(final_centers), probs, bic_scores
 
 
 def build_vibe_label(cluster_id, top_genre_names, anchor_tracks, cluster_size, used_labels, used_artists):
@@ -460,6 +533,99 @@ def build_vibe_label(cluster_id, top_genre_names, anchor_tracks, cluster_size, u
     if top_artist:
         used_artists.add(top_artist.lower())
     return vibe_title
+
+
+def name_clusters_with_ollama(clusters_out, prefs=None, custom_labels=None, timeout=25):
+    """Batch-name discovered music clusters in one Ollama /api/chat call when configured."""
+    import requests
+
+    if not clusters_out:
+        return False
+
+    eff_prefs = prefs or get_effective_preferences()
+    if str(eff_prefs.get("llm_backend") or "").strip().lower() != "ollama":
+        return False
+
+    base_url = str(eff_prefs.get("ollama_url") or getattr(config, "DEFAULT_OLLAMA_URL", "http://127.0.0.1:11434")).rstrip("/")
+    model = str(eff_prefs.get("ollama_model") or getattr(config, "DEFAULT_OLLAMA_MODEL", "qwen3:8b")).strip()
+    if not model:
+        return False
+
+    cluster_briefs = []
+    for c in clusters_out:
+        anchors = [f"{a.get('name', '')} - {a.get('artist', '').split(',')[0].strip()}" for a in (c.get("anchor_tracks") or [])[:5]]
+        t = c.get("telemetry") or {}
+        cluster_briefs.append(
+            {
+                "id": str(c["cluster_id"]),
+                "tracks": c.get("track_count", 0),
+                "top_tags": c.get("top_genres") or [],
+                "avg_bpm": t.get("avg_bpm"),
+                "avg_energy": t.get("avg_energy"),
+                "avg_valence": t.get("avg_valence"),
+                "sample_songs": anchors,
+            }
+        )
+
+    sys_prompt = (
+        "You name music taste clusters from anchor songs and acoustic metrics. "
+        "Return ONLY a JSON object mapping each cluster id string to a concise, natural 2-4 word musical genre or mood title "
+        "(e.g. 'Orchestral & Film Scores', 'Vintage Vocal Jazz', '70s Classic Rock', 'Modern Pop & R&B'). "
+        "Rules: no emojis, no 'Style' or 'Sound' suffixes, no artist-only names unless all samples are covers/comedy, "
+        "and make every cluster name distinct."
+    )
+    user_prompt = json.dumps({"clusters": cluster_briefs}, ensure_ascii=False)
+
+    try:
+        resp = requests.post(
+            f"{base_url}/api/chat",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "stream": False,
+                "think": False,
+                "format": "json",
+                "options": {"temperature": 0.2, "num_predict": 400},
+            },
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return False
+        content = ((resp.json().get("message") or {}).get("content") or "").strip()
+        if not content:
+            return False
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return False
+    except Exception as e:
+        print(f"      ⚠️ Ollama cluster naming skipped ({e}); keeping heuristic titles.")
+        return False
+
+    custom_map = custom_labels or {}
+    used_names = set()
+    updated = 0
+    for c in clusters_out:
+        cid_str = str(c["cluster_id"])
+        raw_name = parsed.get(cid_str)
+        if not isinstance(raw_name, str):
+            continue
+        clean = " ".join(raw_name.strip().split())[:45]
+        if not clean:
+            continue
+        cand = clean
+        n_idx = 2
+        while cand.lower() in used_names:
+            cand = f"{clean} ({n_idx})"
+            n_idx += 1
+        used_names.add(cand.lower())
+        c["auto_vibe_label"] = cand
+        c["vibe_label"] = custom_map.get(cid_str) or cand
+        updated += 1
+
+    return updated > 0
 
 
 def _compute_cluster_telemetry(cluster_idx, track_ids, metadata):
@@ -623,6 +789,7 @@ def main():
         help="Clustering algorithm: gmm (PCA+GMM+BIC) or kmeans (default: auto)",
     )
     parser.add_argument("--k", type=int, default=None, help="Optional fixed number of clusters")
+    parser.add_argument("--no-llm-names", action="store_true", help="Skip batched Ollama cluster naming")
     args = parser.parse_args()
 
     import numpy as np
@@ -736,12 +903,13 @@ def main():
         getattr(config, "DEFAULT_CLUSTER_METHOD", "gmm") if args.method == "auto" else args.method
     )
     min_k = int(getattr(config, "MIN_CLUSTERS", 3))
-    max_k = int(getattr(config, "MAX_CLUSTERS", 10))
+    max_k = int(getattr(config, "MAX_CLUSTERS", 14))
+    max_cluster_share = float(getattr(config, "MAX_CLUSTER_SHARE", 0.22))
     pca_dims = int(getattr(config, "GMM_PCA_DIMS", 20))
 
     probs = None
     if cluster_method == "gmm":
-        print(f"\n[3/3] Analyzing Taste Sub-Clusters (PCA-{pca_dims} + GMM + BIC)...")
+        print(f"\n[3/3] Analyzing Taste Sub-Clusters (Centered PCA-{pca_dims} + GMM + BIC)...")
         labels, cluster_centers, probs, bic_scores = fit_gmm_clusters(
             kept_embeddings,
             weights,
@@ -749,6 +917,7 @@ def main():
             max_k=max_k,
             fixed_k=args.k,
             pca_dims=pca_dims,
+            max_cluster_share=max_cluster_share,
         )
         n_clusters = len(cluster_centers)
         if bic_scores:
@@ -860,13 +1029,19 @@ def main():
             }
         )
 
+    if not args.no_llm_names:
+        if name_clusters_with_ollama(clusters_out, prefs=prefs, custom_labels=custom_labels):
+            print("      -> Refined cluster names with local Ollama LLM")
+
+    for c in clusters_out:
+        telemetry = c.get("telemetry") or {}
         bpm_str = f" | Avg BPM: {telemetry['avg_bpm']}" if telemetry.get("avg_bpm") is not None else ""
         print(
-            f"      -> Cluster {seq_cid}: [{vibe_title}] ({cluster_size} tracks | "
-            f"{weighted_share_pct}% Recency Share | Raw: {raw_pct}%{bpm_str})"
+            f"      -> Cluster {c['cluster_id']}: [{c['vibe_label']}] ({c['track_count']} tracks | "
+            f"{c['weighted_share_pct']}% Recency Share | Raw: {c['raw_percentage']}%{bpm_str})"
         )
-        if anchor_tracks:
-            print(f"         Anchor: '{anchor_tracks[0]['name']}' by {anchor_tracks[0]['artist']}")
+        if c.get("anchor_tracks"):
+            print(f"         Anchor: '{c['anchor_tracks'][0]['name']}' by {c['anchor_tracks'][0]['artist']}")
 
     for kept_pos, tid in enumerate(kept_track_ids):
         metadata[tid]["recency_weight"] = float(weights[kept_pos])

@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -359,6 +360,120 @@ def apply_soft_playlist_cooccurrence(embeddings, track_ids, metadata, weight=0.1
     return mat
 
 
+def _build_clap_text_doc(info):
+    """Format a clean, genre-first metadata description for CLAP text embedding."""
+    raw_name = str(info.get("name") or "Unknown")
+    clean_name = re.sub(r"\s*\|.*$", "", raw_name)
+    clean_name = re.sub(r"\s+", " ", clean_name).strip() or raw_name
+    raw_artist = str(info.get("artists") or "Unknown")
+    clean_artist = re.sub(r"(?i)(?:,\s*)?\b\d+(?:\.\d+)?\s*[kmb]?\s+views?\b", "", raw_artist)
+    clean_artist = re.sub(r"\s+", " ", clean_artist).strip(" ,") or raw_artist
+
+    parts = []
+    genres = str(info.get("genres") or "").strip()
+    if genres:
+        parts.append(f"Music genres: {genres}")
+    parts.append(f"Track: {clean_name} by {clean_artist}")
+    if info.get("year"):
+        parts.append(f"Year: {info['year']}")
+    af_text = format_audio_feature_text(info.get("audio_features") or {})
+    if af_text:
+        parts.append(af_text)
+    return ". ".join(parts)
+
+
+def enrich_missing_genres_with_ollama(track_indices, track_ids, metadata, prefs=None, batch_size=20, timeout=30):
+    """Tag tracks still missing genres using batched local Ollama inference."""
+    import requests
+
+    need = [i for i in track_indices if not (metadata[track_ids[i]].get("genres") or "").strip()]
+    if not need:
+        return 0
+
+    eff_prefs = prefs or get_effective_preferences()
+    if str(eff_prefs.get("llm_backend") or "").strip().lower() != "ollama":
+        return 0
+
+    base_url = str(eff_prefs.get("ollama_url") or getattr(config, "DEFAULT_OLLAMA_URL", "http://127.0.0.1:11434")).rstrip("/")
+    model = str(eff_prefs.get("ollama_model") or getattr(config, "DEFAULT_OLLAMA_MODEL", "qwen3:8b")).strip()
+    if not model:
+        return 0
+
+    sys_prompt = (
+        "You classify songs into accurate musical genres, eras, and styles. "
+        "Return ONLY valid JSON of the form {\"tags\": {\"<id>\": \"genre1, genre2, style\"}} "
+        "with 2 to 4 concise lowercase comma-separated musical tags per id "
+        "(e.g. 'city pop, 80s j-pop, funk pop' or 'classical, romantic orchestral, waltz')."
+    )
+
+    updated = 0
+    for start in range(0, len(need), batch_size):
+        chunk = need[start : start + batch_size]
+        items = []
+        for idx in chunk:
+            info = metadata[track_ids[idx]]
+            clean_name = re.sub(r"\s*\|.*$", "", str(info.get("name") or "")).strip()[:90]
+            clean_artist = re.sub(r"(?i)(?:,\s*)?\b\d+(?:\.\d+)?\s*[kmb]?\s+views?\b", "", str(info.get("artists") or "")).strip(" ,")[:70]
+            items.append({"id": str(idx), "title": clean_name, "artist": clean_artist})
+
+        try:
+            resp = requests.post(
+                f"{base_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": json.dumps({"tracks": items}, ensure_ascii=False)},
+                    ],
+                    "stream": False,
+                    "think": False,
+                    "format": "json",
+                    "options": {"temperature": 0.1, "num_predict": 800},
+                },
+                timeout=timeout,
+            )
+            if resp.status_code != 200:
+                continue
+            content = ((resp.json().get("message") or {}).get("content") or "").strip()
+            if not content:
+                continue
+            parsed = json.loads(content)
+            tag_map = parsed.get("tags") if isinstance(parsed, dict) and isinstance(parsed.get("tags"), dict) else parsed
+            if not isinstance(tag_map, dict):
+                continue
+            for idx in chunk:
+                raw_tags = tag_map.get(str(idx))
+                if isinstance(raw_tags, list):
+                    raw_tags = ", ".join(str(x).strip() for x in raw_tags if str(x).strip())
+                if isinstance(raw_tags, str):
+                    clean_tags = ", ".join(t.strip().lower() for t in raw_tags.split(",") if t.strip())[:120]
+                    if clean_tags:
+                        metadata[track_ids[idx]]["genres"] = clean_tags
+                        updated += 1
+        except requests.RequestException as e:
+            print(f"      ⚠️ Ollama genre enrichment skipped ({e}).")
+            break
+        except Exception:
+            continue
+
+    if updated:
+        print(f"      🏷️ Enriched genres via Ollama for {updated}/{len(need)} previewless tracks.")
+    return updated
+
+
+def _center_and_normalize(mat):
+    import numpy as np
+
+    arr = np.asarray(mat, dtype=np.float32)
+    if len(arr) == 0:
+        return arr
+    if len(arr) >= 3:
+        arr = arr - np.mean(arr, axis=0, keepdims=True)
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms = np.where(norms > 1e-8, norms, 1.0)
+    return (arr / norms).astype(np.float32)
+
+
 def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
     """Enrich missing audio/DSP telemetry from Deezer 30s previews and embed via CLAP."""
     import threading
@@ -392,7 +507,7 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
 
         with cache_lock:
             cached_dz = deezer_cache.get(fp)
-        if cached_dz is None:
+        if cached_dz is None or (isinstance(cached_dz, dict) and not cached_dz.get("found") and cached_dz.get("v") != 2):
             cached_dz = dz.search_deezer_track(name, artist, cache=None)
             with cache_lock:
                 deezer_cache[fp] = cached_dz
@@ -472,37 +587,40 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
             for idx_pos, orig_idx in enumerate(need_tag_idx):
                 metadata[track_ids[orig_idx]]["genres"] = ", ".join(tag_lists[idx_pos])
 
-    # Embed tracks without previews using CLAP text encoder in the same 512-D space
-    text_vectors = {}
+    # Enrich genres for previewless tracks via local Ollama before CLAP text encoding
     if text_fallback_indices:
-        fallback_docs = []
+        enrich_missing_genres_with_ollama(text_fallback_indices, track_ids, metadata)
+
+    # Encode clean genre-first metadata for ALL tracks so audio embeddings gain style/era grounding
+    ordered_indices = audio_indices + text_fallback_indices
+    result_vecs = {}
+    if ordered_indices:
+        all_text_docs = [_build_clap_text_doc(metadata[track_ids[i]]) for i in ordered_indices]
+        raw_text_mat = embed_texts_clap(all_text_docs, processor, model, device=device)
+        text_centered = _center_and_normalize(raw_text_mat)
+        pos_by_idx = {orig_idx: pos for pos, orig_idx in enumerate(ordered_indices)}
+
+        w_text = float(getattr(config, "CLAP_TEXT_BLEND_WEIGHT", 0.28))
+        if audio_indices:
+            audio_mat = np.vstack([audio_vectors[i] for i in audio_indices])
+            audio_centered = _center_and_normalize(audio_mat)
+            for pos_a, orig_idx in enumerate(audio_indices):
+                t_vec = text_centered[pos_by_idx[orig_idx]]
+                blended = ((1.0 - w_text) * audio_centered[pos_a]) + (w_text * t_vec)
+                b_norm = float(np.linalg.norm(blended))
+                if b_norm > 1e-8:
+                    blended = blended / b_norm
+                result_vecs[orig_idx] = blended.astype(np.float32)
+
         for orig_idx in text_fallback_indices:
-            info = metadata[track_ids[orig_idx]]
-            af_text = format_audio_feature_text(info.get("audio_features") or {})
-            doc = f"Track: {info['name']} | Artist: {info['artists']}"
-            if info.get("year"):
-                doc += f" | Year: {info['year']}"
-            if info.get("genres"):
-                doc += f" | Genres: {info['genres']}"
-            if af_text:
-                doc += f" | {af_text}"
-            fallback_docs.append(doc)
-        t_mat = embed_texts_clap(fallback_docs, processor, model, device=device)
-        if audio_vectors and len(t_mat) > 0:
-            audio_mat = np.vstack(list(audio_vectors.values()))
-            delta = np.mean(audio_mat, axis=0) - np.mean(t_mat, axis=0)
-            shifted = t_mat + delta
-            norms = np.linalg.norm(shifted, axis=1, keepdims=True)
-            norms = np.where(norms > 1e-8, norms, 1.0)
-            t_mat = (shifted / norms).astype(np.float32)
-            print(f"      🌉 Bridged CLAP modality gap for {len(text_fallback_indices)} text-fallback tracks.")
-        for pos, orig_idx in enumerate(text_fallback_indices):
-            text_vectors[orig_idx] = t_mat[pos]
+            result_vecs[orig_idx] = text_centered[pos_by_idx[orig_idx]].astype(np.float32)
             metadata[track_ids[orig_idx]]["embed_source"] = "clap_text"
 
-    result_vecs = {}
-    result_vecs.update(audio_vectors)
-    result_vecs.update(text_vectors)
+        print(
+            f"      🧬 Mean-centered & blended {len(audio_indices)} audio tracks "
+            f"(text weight={w_text:.2f}) + {len(text_fallback_indices)} semantic text tracks."
+        )
+
     return result_vecs, CLAP_DIM
 
 
@@ -555,7 +673,7 @@ def main():
     for tid in track_ids:
         metadata[tid]["embed_backend"] = backend
         metadata[tid]["doc_hash"] = hashlib.sha256(
-            f"{backend}:{clap_id}::{metadata[tid]['doc_hash']}".encode("utf-8")
+            f"{backend}:v2:{clap_id}::{metadata[tid]['doc_hash']}".encode("utf-8")
         ).hexdigest()[:16]
 
     base_dir = os.path.dirname(os.path.abspath(__file__))

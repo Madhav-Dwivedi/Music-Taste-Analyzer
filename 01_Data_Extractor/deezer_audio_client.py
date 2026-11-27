@@ -21,10 +21,19 @@ DEEZER_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "de
 DSP_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio_dsp_cache.json")
 
 _STRIP_PARENS_RE = re.compile(
-    r"(?i)\s*[\(\[](?:official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics|"
-    r"remaster(?:ed)?(?:\s*\d{4})?|\d{4}\s*remaster(?:ed)?|live[^)\]]*|audio|hd|4k|"
-    r"feat\.?[^)\]]*|ft\.?[^)\]]*)[\)\]]"
+    r"(?i)\s*[\(\[（【](?:official\s*(?:music\s*|hd\s*|4k\s*|lyric\s*)?video|official\s*audio|"
+    r"official\s*lyric\s*video|lyric\s*video|lyrics?|remaster(?:ed)?(?:\s*\d{4})?|"
+    r"\d{4}\s*remaster(?:ed)?|live[^)\]）】]*|audio|hd|4k|full(?:\s*version)?|完整版|"
+    r"covered?\s*by[^)\]）】]*|from\s*[^)\]）】]*|feat\.?[^)\]）】]*|ft\.?[^)\]）】]*)[\)\]）】]"
 )
+_VIEW_COUNT_RE = re.compile(r"(?i)(?:,\s*)?\b\d+(?:\.\d+)?\s*[kmb]?\s+views?\b")
+_PIPE_TAIL_RE = re.compile(r"\s*\|.*$")
+_HASHTAG_RE = re.compile(r"#\S+")
+_NOISE_PHRASES_RE = re.compile(
+    r"(?i)\b(?:official\s*(?:hd|4k|music|lyric)?\s*video|official\s*audio|"
+    r"4k\s*video\s*song|music\s*video|lyric\s*video|full\s*song|full\s*video)\b"
+)
+_EMOJI_RE = re.compile(r"[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f]+")
 _TOPIC_SUFFIX_RE = re.compile(r"(?i)\s*-\s*topic$")
 _RATE_LOCK = threading.Lock()
 _LAST_DEEZER_CALL = 0.0
@@ -34,14 +43,108 @@ _MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39,
 _MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17], dtype=float)
 
 
-def _clean_query_parts(title, artist):
-    clean_title = _STRIP_PARENS_RE.sub("", str(title or "")).strip()
-    clean_title = re.sub(r"\s+", " ", clean_title) or str(title or "").strip()
-    primary_artist = str(artist or "").split(",")[0].strip()
+def _strip_wrapping_quotes(text):
+    return str(text or "").strip().strip('"\'“”‘’').strip()
+
+
+def _clean_title_text(title):
+    s = str(title or "").replace("\u3000", " ").strip()
+    s = _PIPE_TAIL_RE.sub("", s)
+    s = _HASHTAG_RE.sub(" ", s)
+    s = _EMOJI_RE.sub(" ", s)
+    s = _STRIP_PARENS_RE.sub(" ", s)
+    s = _NOISE_PHRASES_RE.sub(" ", s)
+    s = re.sub(r"\s*[:\-–—]\s*$", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return _strip_wrapping_quotes(s) or _strip_wrapping_quotes(str(title or ""))
+
+
+def _clean_artist_text(artist):
+    raw = _VIEW_COUNT_RE.sub("", str(artist or ""))
+    primary_artist = raw.split(",")[0].strip()
     primary_artist = _TOPIC_SUFFIX_RE.sub("", primary_artist).strip()
     if primary_artist.lower() in ("unknown", "various artists"):
         primary_artist = ""
-    return clean_title, primary_artist
+    return primary_artist
+
+
+def _clean_query_parts(title, artist):
+    return _clean_title_text(title), _clean_artist_text(artist)
+
+
+def _extract_ascii_phrase(text):
+    """Extract a clean, deduplicated ASCII title phrase from mixed-script titles."""
+    ascii_parts = re.findall(r"[A-Za-z0-9][A-Za-z0-9'’&,.\- ]{3,}", str(text or ""))
+    best_words = []
+    for part in ascii_parts:
+        # Strip inline repeats like 'I CAN'T STOP THE LONELINESS - ... I CAN'T STOP THE LONELINESS'
+        segments = [seg.strip(" -–—") for seg in re.split(r"\s+[-–—]\s+", part) if seg.strip(" -–—")]
+        for seg in segments:
+            alpha_cnt = sum(1 for ch in seg if ch.isalpha())
+            if alpha_cnt >= 5:
+                norm = re.sub(r"\s+", " ", seg).strip()
+                if norm.lower() not in [w.lower() for w in best_words]:
+                    best_words.append(norm)
+    if not best_words:
+        return ""
+    # Prefer the first English/ASCII phrase if shorter than full concatenated duplicate
+    candidate = best_words[0]
+    for w in best_words:
+        if any(ch.isupper() for ch in w) and len(w.split()) >= 2:
+            candidate = w
+            break
+    return _strip_wrapping_quotes(candidate)
+
+
+def _build_search_candidates(title, artist):
+    """Build ordered (clean_title, artist) search candidates for noisy YouTube Music metadata."""
+    clean_title, primary_artist = _clean_query_parts(title, artist)
+    if not clean_title:
+        return []
+
+    candidates = []
+    seen = set()
+
+    def _add(cand_t, cand_a):
+        ct = _strip_wrapping_quotes(re.sub(r"\s+", " ", str(cand_t or "")).strip())
+        ca = str(cand_a or "").strip()
+        if not ct:
+            return
+        key = (ct.lower(), ca.lower())
+        if key not in seen:
+            seen.add(key)
+            candidates.append((ct, ca))
+
+    has_non_ascii = any(ord(ch) > 127 for ch in clean_title)
+    ascii_phrase = _extract_ascii_phrase(clean_title) if has_non_ascii else ""
+
+    if ascii_phrase and ascii_phrase.lower() != clean_title.lower():
+        _add(ascii_phrase, primary_artist)
+
+    dash_match = re.split(r"\s+[-–—]\s+", clean_title, maxsplit=1)
+    if len(dash_match) == 2:
+        left = _clean_title_text(dash_match[0])
+        right = _clean_title_text(dash_match[1])
+        if primary_artist and left.lower() == primary_artist.lower():
+            # e.g. 'Zak Azoury - Familiar Feelings' by 'Zak Azoury'
+            _add(right, primary_artist)
+        elif has_non_ascii and ascii_phrase:
+            # Bilingual title like '悲しみがとまらない I CAN'T STOP THE LONELINESS - Kanashimi...'
+            if left:
+                _add(left, primary_artist)
+            if right:
+                _add(right, primary_artist)
+        else:
+            if right and left:
+                # Rescues re-uploads like 'The Handsome Family - Far From Any Road' by 'Beatriz'
+                _add(right, left)
+            if right and primary_artist:
+                _add(right, primary_artist)
+            if left and primary_artist:
+                _add(left, primary_artist)
+
+    _add(clean_title, primary_artist)
+    return candidates[:4]
 
 
 def _similarity(a, b):
@@ -104,32 +207,39 @@ def search_deezer_track(title, artist, session=None, cache=None):
     """Search Deezer public API for a track's metadata, BPM, and 30s MP3 preview URL."""
     fp = get_track_fingerprint(title, artist)
     if cache is not None and fp in cache:
-        return cache[fp]
+        cached = cache[fp]
+        if isinstance(cached, dict) and (cached.get("found") or cached.get("v") == 2):
+            return cached
 
-    clean_title, primary_artist = _clean_query_parts(title, artist)
-    if not clean_title:
-        res = {"found": False}
+    candidates = _build_search_candidates(title, artist)
+    if not candidates:
+        res = {"found": False, "v": 2}
         if cache is not None:
             cache[fp] = res
         return res
 
-    queries = []
-    if primary_artist:
-        queries.append(f'artist:"{primary_artist}" track:"{clean_title}"')
-        queries.append(f"{clean_title} {primary_artist}")
-    else:
-        queries.append(clean_title)
-
     matched = None
-    for q in queries:
-        data = _polite_deezer_get("https://api.deezer.com/search", params={"q": q, "limit": 5}, session=session)
-        items = (data or {}).get("data") or []
-        matched = _pick_best_deezer_match(items, clean_title, primary_artist)
+    matched_title, matched_artist = candidates[0]
+    for cand_title, cand_artist in candidates:
+        queries = []
+        if cand_artist:
+            queries.append(f'artist:"{cand_artist}" track:"{cand_title}"')
+            queries.append(f"{cand_title} {cand_artist}")
+        else:
+            queries.append(cand_title)
+
+        for q in queries:
+            data = _polite_deezer_get("https://api.deezer.com/search", params={"q": q, "limit": 5}, session=session)
+            items = (data or {}).get("data") or []
+            matched = _pick_best_deezer_match(items, cand_title, cand_artist)
+            if matched is not None:
+                matched_title, matched_artist = cand_title, cand_artist
+                break
         if matched is not None:
             break
 
     if matched is None:
-        res = {"found": False}
+        res = {"found": False, "v": 2}
     else:
         album = matched.get("album") or {}
         artist_obj = matched.get("artist") or {}
@@ -143,9 +253,10 @@ def search_deezer_track(title, artist, session=None, cache=None):
 
         res = {
             "found": True,
+            "v": 2,
             "deezer_id": matched.get("id"),
-            "title": matched.get("title") or clean_title,
-            "artist": artist_obj.get("name") or primary_artist,
+            "title": matched.get("title") or matched_title,
+            "artist": artist_obj.get("name") or matched_artist,
             "album": album.get("title") or "",
             "album_id": album.get("id"),
             "preview_url": matched.get("preview") or "",

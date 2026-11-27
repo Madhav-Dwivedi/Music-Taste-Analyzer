@@ -460,6 +460,14 @@
                                 <input type="checkbox" id="chkShowEraPath" checked />
                                 <span>Era path</span>
                             </label>
+                            <label class="checkbox-row">
+                                <input type="checkbox" id="chkShowCentroids" checked />
+                                <span>Cluster labels</span>
+                            </label>
+                            <label class="checkbox-row">
+                                <input type="checkbox" id="chkShowClouds" checked />
+                                <span>Cluster clouds</span>
+                            </label>
                             <select id="mapClickAction" style="width:auto;" title="Action when clicking a track">
                                 <option value="preview">Click: Preview in dock</option>
                                 <option value="spotify">Click: Open track link</option>
@@ -958,7 +966,7 @@
             <span id="previewTrackTitle" class="preview-track-title">Track preview</span>
             <button class="btn btn-xs" id="btnClosePreview" type="button" aria-label="Close preview">✕</button>
         </div>
-        <iframe id="previewIframe" width="320" height="80" frameborder="0" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
+        <iframe id="previewIframe" width="320" height="80" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
     </div>
 
     <!-- CONFIRM MODAL -->

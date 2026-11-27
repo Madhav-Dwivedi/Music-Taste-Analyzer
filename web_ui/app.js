@@ -23,7 +23,27 @@
         llmCatalogData: null,
         statusInFlight: false,
         mapFilterTimer: null,
+        mapTraceIndex: [],
     };
+
+    const CLUSTER_COLORS = [
+        "#e5a04b",
+        "#5b9bd5",
+        "#4cc38a",
+        "#d96b6b",
+        "#9b87c2",
+        "#52b7b1",
+        "#c98b5b",
+        "#7fa8d7",
+        "#a8c26c",
+        "#d68cb8",
+        "#6ea8fe",
+        "#e899dc",
+        "#a3d977",
+        "#f4a261",
+        "#72d5cb",
+        "#c9a0dc",
+    ];
 
     const SPOTIFY_ID_RE = /^[A-Za-z0-9]{10,40}$/;
     const YTM_VID_RE = /^[A-Za-z0-9_-]{11}$/;
@@ -78,10 +98,13 @@
 
         const preferYtm = Boolean(vid && (!spId || state.activeProvider === "ytmusic" || prov === "ytmusic"));
         const iframe = document.getElementById("previewIframe");
+        const ytmEmbedUrl = (videoId) =>
+            `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&origin=${encodeURIComponent(window.location.origin)}`;
         if (preferYtm) {
             document.getElementById("previewTrackTitle").textContent = label;
             iframe.height = "180";
-            iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(vid)}?autoplay=1`;
+            iframe.referrerPolicy = "strict-origin-when-cross-origin";
+            iframe.src = ytmEmbedUrl(vid);
             document.getElementById("previewDock").style.display = "block";
             return;
         }
@@ -95,7 +118,8 @@
         if (vid) {
             document.getElementById("previewTrackTitle").textContent = label;
             iframe.height = "180";
-            iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(vid)}?autoplay=1`;
+            iframe.referrerPolicy = "strict-origin-when-cross-origin";
+            iframe.src = ytmEmbedUrl(vid);
             document.getElementById("previewDock").style.display = "block";
             return;
         }
@@ -406,7 +430,7 @@
         document.getElementById("drawerJobTitle").textContent = `Live Job Console — ${label} [${status}]`;
         document.getElementById("btnCancelJob").style.display = running ? "inline-flex" : "none";
 
-        ["btnFullSync", "btnRunStage1", "btnRunStage1Ytm", "btnRunStage2", "btnRunMap", "btnRunHistory", "btnRebuildWithGuardrails", "btnRefreshMap"].forEach(
+        ["btnFullSync", "btnRunStage1", "btnRunStage1Ytm", "btnRunStage2", "btnRunMap", "btnRunHistory", "btnRebuildWithGuardrails", "btnRefreshMap", "mapProjectionSelect"].forEach(
             (id) => {
                 const el = document.getElementById(id);
                 if (el) el.disabled = running;
@@ -656,6 +680,181 @@
         }
     }
 
+    function computeMapMarkerStyle(item, color, q, minW, is3d) {
+        const hasFilter = Boolean(q || minW > 0);
+        const textMatch = !q || item.searchKey.includes(q);
+        const weightMatch = item.weight >= minW;
+        const active = textMatch && weightMatch;
+        if (!hasFilter) {
+            return {
+                active: true,
+                color,
+                size: is3d ? item.baseSize3d : item.baseSize2d,
+                opacity: item.baseOp,
+                lineColor: "rgba(0, 0, 0, 0.25)",
+                lineWidth: 0.5,
+            };
+        }
+        if (active) {
+            return {
+                active: true,
+                color,
+                size: is3d ? Math.max(9, item.baseSize3d + 4) : Math.max(14, item.baseSize2d + 5),
+                opacity: 1.0,
+                lineColor: "rgba(255, 255, 255, 0.85)",
+                lineWidth: 1.5,
+            };
+        }
+        return {
+            active: false,
+            color: is3d ? "rgba(68, 70, 80, 0.14)" : "rgba(74, 76, 86, 0.12)",
+            size: is3d ? 2.5 : 3,
+            opacity: 0.14,
+            lineColor: "rgba(0, 0, 0, 0)",
+            lineWidth: 0,
+        };
+    }
+
+    function applyTasteMapFilter() {
+        const plotEl = document.getElementById("tasteMapPlot");
+        if (!state.mapData || typeof Plotly === "undefined" || !plotEl || !plotEl.data || !state.mapTraceIndex.length) {
+            renderTasteMapPlot();
+            return;
+        }
+        const q = document.getElementById("mapSearchBox").value.trim().toLowerCase();
+        const minW = parseFloat(document.getElementById("mapWeightSlider").value || "0");
+        document.getElementById("mapWeightVal").textContent = String(minW);
+        const hasFilter = Boolean(q || minW > 0);
+
+        let matches = 0;
+        const traceIndices = [];
+        const colorArrays = [];
+        const sizeArrays = [];
+        const opArrays = [];
+        const lineColorArrays = [];
+        const lineWidthArrays = [];
+
+        state.mapTraceIndex.forEach((tr) => {
+            const cArr = [];
+            const sArr = [];
+            const oArr = [];
+            const lcArr = [];
+            const lwArr = [];
+            tr.items.forEach((item) => {
+                const st = computeMapMarkerStyle(item, tr.color, q, minW, state.is3d);
+                if (hasFilter && st.active) matches += 1;
+                cArr.push(st.color);
+                sArr.push(st.size);
+                oArr.push(st.opacity);
+                lcArr.push(st.lineColor);
+                lwArr.push(st.lineWidth);
+            });
+            traceIndices.push(tr.traceIdx);
+            colorArrays.push(cArr);
+            sizeArrays.push(sArr);
+            opArrays.push(oArr);
+            lineColorArrays.push(lcArr);
+            lineWidthArrays.push(lwArr);
+        });
+
+        document.getElementById("mapMatchCount").textContent = hasFilter ? `${matches} matching tracks` : "";
+        Promise.resolve(
+            Plotly.restyle(
+                plotEl,
+                {
+                    "marker.color": colorArrays,
+                    "marker.size": sizeArrays,
+                    "marker.opacity": opArrays,
+                    "marker.line.color": lineColorArrays,
+                    "marker.line.width": lineWidthArrays,
+                },
+                traceIndices
+            )
+        ).then(() => {
+            if (state.is3d) disableMesh3dPicking(plotEl);
+        });
+    }
+
+    function hexToRgba(hex, alpha) {
+        const clean = String(hex || "").replace("#", "");
+        if (clean.length !== 6) return `rgba(229, 160, 75, ${alpha})`;
+        const r = parseInt(clean.slice(0, 2), 16);
+        const g = parseInt(clean.slice(2, 4), 16);
+        const b = parseInt(clean.slice(4, 6), 16);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    function trimOutliers(points, maxSigma = 1.35) {
+        if (!Array.isArray(points) || points.length < 5) return points || [];
+        const n = points.length;
+        const mx = points.reduce((s, p) => s + p.x, 0) / n;
+        const my = points.reduce((s, p) => s + p.y, 0) / n;
+        const mz = points.reduce((s, p) => s + (p.z || 0), 0) / n;
+        const dists = points.map((p) => Math.hypot(p.x - mx, p.y - my, (p.z || 0) - mz));
+        const meanD = dists.reduce((s, d) => s + d, 0) / n;
+        const varD = dists.reduce((s, d) => s + (d - meanD) ** 2, 0) / n;
+        const stdD = Math.sqrt(varD);
+        if (stdD < 1e-9) return points;
+        const limit = meanD + maxSigma * stdD;
+        const kept = points.filter((_, i) => dists[i] <= limit);
+        return kept.length >= 4 ? kept : points;
+    }
+
+    function disableMesh3dPicking(plotEl) {
+        try {
+            const scene = plotEl?._fullLayout?.scene?._scene;
+            if (!scene) return;
+            const noop = () => {};
+            const nullPick = () => null;
+            if (scene.traces && typeof scene.traces === "object") {
+                Object.values(scene.traces).forEach((tr) => {
+                    const isMesh = tr?.data?.type === "mesh3d" || tr?.type === "mesh3d";
+                    if (isMesh && tr.mesh) {
+                        tr.mesh.drawPick = noop;
+                        tr.mesh.pick = nullPick;
+                    }
+                });
+            }
+            if (Array.isArray(scene.glplot?.objects)) {
+                scene.glplot.objects.forEach((obj) => {
+                    if (obj && (obj._trace?.data?.type === "mesh3d" || obj._trace?.type === "mesh3d")) {
+                        obj.drawPick = noop;
+                        obj.pick = nullPick;
+                    }
+                });
+                scene.glplot.dirty = true;
+            }
+        } catch {
+            // Non-fatal fallback if Plotly internals differ
+        }
+    }
+
+    function computeConvexHull2D(points) {
+        if (!Array.isArray(points) || points.length < 3) return points || [];
+        const sorted = [...points].sort((a, b) => (a.x !== b.x ? a.x - b.x : a.y - b.y));
+        const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+        const lower = [];
+        for (const p of sorted) {
+            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+                lower.pop();
+            }
+            lower.push(p);
+        }
+        const upper = [];
+        for (let i = sorted.length - 1; i >= 0; i--) {
+            const p = sorted[i];
+            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+                upper.pop();
+            }
+            upper.push(p);
+        }
+        upper.pop();
+        lower.pop();
+        const hull = lower.concat(upper);
+        if (hull.length >= 3) hull.push(hull[0]);
+        return hull;
+    }
+
     function renderTasteMapPlot() {
         const data = state.mapData;
         if (!data) return;
@@ -666,41 +865,104 @@
         }
         document.getElementById("mapOfflineBanner").style.display = "none";
 
-        const colors = ["#e5a04b", "#5b9bd5", "#4cc38a", "#d96b6b", "#9b87c2", "#52b7b1", "#c98b5b"];
         const q = document.getElementById("mapSearchBox").value.trim().toLowerCase();
         const minW = parseFloat(document.getElementById("mapWeightSlider").value || "0");
         document.getElementById("mapWeightVal").textContent = String(minW);
+        const hasFilter = Boolean(q || minW > 0);
         const showEraPath = document.getElementById("chkShowEraPath").checked;
+        const showCentroids = document.getElementById("chkShowCentroids")?.checked !== false;
+        const showClouds = document.getElementById("chkShowClouds")?.checked !== false;
 
         let matches = 0;
         const traces = [];
+        const centroids = [];
+        state.mapTraceIndex = [];
+
+        if (showClouds) {
+            (data.clusters || []).forEach((c, idx) => {
+                const color = CLUSTER_COLORS[idx % CLUSTER_COLORS.length];
+                const pts = (data.tracks || []).filter((t) => t.cluster_id === c.cluster_id);
+                if (pts.length < 4) return;
+                const rawCoords = pts.map((t) => ({
+                    x: state.is3d ? t.x3 : t.x,
+                    y: state.is3d ? t.y3 : t.y,
+                    z: t.z || 0,
+                }));
+                const trimmed = trimOutliers(rawCoords, 1.35);
+                if (trimmed.length < 4) return;
+
+                if (state.is3d) {
+                    traces.push({
+                        type: "mesh3d",
+                        x: trimmed.map((p) => p.x),
+                        y: trimmed.map((p) => p.y),
+                        z: trimmed.map((p) => p.z),
+                        alphahull: 0,
+                        color,
+                        opacity: 0.08,
+                        flatshading: true,
+                        lighting: { ambient: 0.9, diffuse: 0.3, specular: 0.0 },
+                        hoverinfo: "skip",
+                        showlegend: false,
+                    });
+                } else {
+                    const hull = computeConvexHull2D(trimmed);
+                    if (hull.length >= 4) {
+                        traces.push({
+                            type: "scatter",
+                            mode: "lines",
+                            x: hull.map((p) => p.x),
+                            y: hull.map((p) => p.y),
+                            fill: "toself",
+                            fillcolor: hexToRgba(color, 0.06),
+                            line: { color: hexToRgba(color, 0.20), width: 1 },
+                            hoverinfo: "skip",
+                            showlegend: false,
+                        });
+                    }
+                }
+            });
+        }
 
         (data.clusters || []).forEach((c, idx) => {
-            const color = colors[idx % colors.length];
+            const color = CLUSTER_COLORS[idx % CLUSTER_COLORS.length];
             const pts = (data.tracks || []).filter((t) => t.cluster_id === c.cluster_id);
             const x = [];
             const y = [];
             const z = [];
+            const colorsArr = [];
             const sizes = [];
             const ops = [];
+            const lineColors = [];
+            const lineWidths = [];
             const texts = [];
             const meta = [];
+            const indexedItems = [];
 
             pts.forEach((t) => {
-                const searchKey = `${t.name} ${t.artist} ${t.genres}`.toLowerCase();
-                const textMatch = !q || searchKey.includes(q);
-                const weightMatch = (t.recency_weight || 0) >= minW;
-                const active = textMatch && weightMatch;
-                if ((q || minW > 0) && active) matches += 1;
-
-                const baseSize = Math.min(20, Math.max(5, Math.round(4 + Math.pow(t.recency_weight || 1, 0.6) * 2)));
+                const baseSize2d = Math.min(20, Math.max(5, Math.round(4 + Math.pow(t.recency_weight || 1, 0.6) * 2)));
+                const baseSize3d = Math.max(3, Math.round(baseSize2d * 0.55));
                 const baseOp = Math.min(1.0, Math.max(0.35, 0.35 + (t.recency_weight || 1) / 30.0));
+                const item = {
+                    searchKey: `${t.name} ${t.artist} ${t.genres}`.toLowerCase(),
+                    weight: Number(t.recency_weight || 0),
+                    baseSize2d,
+                    baseSize3d,
+                    baseOp,
+                };
+                indexedItems.push(item);
+
+                const st = computeMapMarkerStyle(item, color, q, minW, state.is3d);
+                if (hasFilter && st.active) matches += 1;
 
                 x.push(state.is3d ? t.x3 : t.x);
                 y.push(state.is3d ? t.y3 : t.y);
                 z.push(t.z);
-                sizes.push((q || minW > 0) ? (active ? (q ? Math.max(11, baseSize + 3) : baseSize) : 4) : (state.is3d ? Math.max(3, Math.round(baseSize * 0.55)) : baseSize));
-                ops.push((q || minW > 0) ? (active ? (q ? 1.0 : baseOp) : 0.05) : baseOp);
+                colorsArr.push(st.color);
+                sizes.push(st.size);
+                ops.push(st.opacity);
+                lineColors.push(st.lineColor);
+                lineWidths.push(st.lineWidth);
                 meta.push({
                     url: t.spotify_url || "",
                     yt_url: t.youtube_url || "",
@@ -721,6 +983,25 @@
                 );
             });
 
+            if (pts.length) {
+                const cx = x.reduce((acc, v) => acc + v, 0) / x.length;
+                const cy = y.reduce((acc, v) => acc + v, 0) / y.length;
+                const cz = z.reduce((acc, v) => acc + v, 0) / z.length;
+                centroids.push({
+                    cx,
+                    cy,
+                    cz,
+                    color,
+                    label: `C${c.cluster_id} · ${c.vibe_label}`,
+                });
+            }
+
+            state.mapTraceIndex.push({
+                traceIdx: traces.length,
+                color,
+                items: indexedItems,
+            });
+
             const trace = {
                 x, y,
                 mode: "markers",
@@ -729,11 +1010,38 @@
                 text: texts,
                 customdata: meta,
                 hoverinfo: "text",
-                marker: { size: sizes, color, opacity: ops },
+                marker: { size: sizes, color: colorsArr, opacity: ops, line: { color: lineColors, width: lineWidths } },
             };
             if (state.is3d) trace.z = z;
             traces.push(trace);
         });
+
+        if (showCentroids && centroids.length) {
+            const centroidTrace = {
+                x: centroids.map((ct) => ct.cx),
+                y: centroids.map((ct) => ct.cy),
+                mode: "markers+text",
+                type: state.is3d ? "scatter3d" : "scatter",
+                name: "Cluster Centers",
+                showlegend: false,
+                hoverinfo: "skip",
+                text: centroids.map((ct) => ct.label),
+                textposition: "top center",
+                textfont: {
+                    color: "#ededed",
+                    size: state.is3d ? 10 : 11,
+                    family: "'IBM Plex Sans', sans-serif",
+                },
+                marker: {
+                    size: state.is3d ? 5 : 7,
+                    symbol: "diamond",
+                    color: centroids.map((ct) => ct.color),
+                    line: { color: "#ededed", width: 1 },
+                },
+            };
+            if (state.is3d) centroidTrace.z = centroids.map((ct) => ct.cz);
+            traces.push(centroidTrace);
+        }
 
         const eraTraj = Array.isArray(data.era_trajectory) ? data.era_trajectory : [];
         if (showEraPath && eraTraj.length) {
@@ -768,7 +1076,7 @@
             }
         }
 
-        document.getElementById("mapMatchCount").textContent = (q || minW > 0) ? `${matches} matching tracks` : "";
+        document.getElementById("mapMatchCount").textContent = hasFilter ? `${matches} matching tracks` : "";
 
         const projUpper = (data.projection_method || "pca").toUpperCase();
         const ev2 = data.explained_variance_2d || [0, 0];
@@ -781,6 +1089,7 @@
         };
         const layout = state.is3d
             ? {
+                  uirevision: "taste-map-v1",
                   paper_bgcolor: "#19191b",
                   font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
                   scene: {
@@ -793,6 +1102,7 @@
                   legend: { orientation: "h", y: -0.05 },
               }
             : {
+                  uirevision: "taste-map-v1",
                   paper_bgcolor: "#19191b",
                   plot_bgcolor: "#141415",
                   font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
@@ -802,7 +1112,9 @@
                   legend: { orientation: "h", y: -0.18 },
               };
 
-        Plotly.newPlot(plotEl, traces, layout, { responsive: true });
+        Promise.resolve(Plotly.newPlot(plotEl, traces, layout, { responsive: true })).then(() => {
+            if (state.is3d) disableMesh3dPicking(plotEl);
+        });
         if (typeof plotEl.removeAllListeners === "function") {
             plotEl.removeAllListeners("plotly_click");
         }
@@ -822,7 +1134,6 @@
     function renderClusterRadar(clusters) {
         const el = document.getElementById("clusterRadarPlot");
         if (typeof Plotly === "undefined") return;
-        const colors = ["#e5a04b", "#5b9bd5", "#4cc38a", "#d96b6b", "#9b87c2", "#52b7b1", "#c98b5b"];
         const traces = clusters.map((c, idx) => {
             const t = c.telemetry || {};
             const normBpm = t.avg_bpm != null ? Math.min(1, Math.max(0, (t.avg_bpm - 60) / 120)) : 0.5;
@@ -840,7 +1151,7 @@
                 theta: ["Energy", "Valence", "Danceability", "Acousticness", "Tempo", "Energy"],
                 fill: "toself",
                 name: `C${c.cluster_id}`,
-                line: { color: colors[idx % colors.length] },
+                line: { color: CLUSTER_COLORS[idx % CLUSTER_COLORS.length] },
                 opacity: 0.7,
             };
         });
@@ -1679,6 +1990,12 @@
         document.getElementById("btnRefreshMap").addEventListener("click", () =>
             startJob("tastemap", { projection: document.getElementById("mapProjectionSelect").value })
         );
+        document.getElementById("mapProjectionSelect").addEventListener("change", (e) => {
+            const proj = e.target.value;
+            if (!state.mapData || (state.mapData.projection_method || "pca").toLowerCase() !== proj) {
+                startJob("tastemap", { projection: proj });
+            }
+        });
         document.getElementById("btnRunHistory").addEventListener("click", () => startJob("history"));
 
         // Drag-and-drop Extended History Upload
@@ -2335,22 +2652,24 @@
         });
 
         // Taste Map
-        const scheduleMapRender = () => {
+        const scheduleMapFilter = () => {
             clearTimeout(state.mapFilterTimer);
-            state.mapFilterTimer = setTimeout(renderTasteMapPlot, 150);
+            state.mapFilterTimer = setTimeout(applyTasteMapFilter, 80);
         };
-        document.getElementById("mapSearchBox").addEventListener("input", scheduleMapRender);
-        document.getElementById("mapWeightSlider").addEventListener("input", scheduleMapRender);
+        document.getElementById("mapSearchBox").addEventListener("input", scheduleMapFilter);
+        document.getElementById("mapWeightSlider").addEventListener("input", scheduleMapFilter);
         document.getElementById("chkShowEraPath").addEventListener("change", renderTasteMapPlot);
+        document.getElementById("chkShowCentroids").addEventListener("change", renderTasteMapPlot);
+        document.getElementById("chkShowClouds").addEventListener("change", renderTasteMapPlot);
         document.getElementById("btnToggle3D").addEventListener("click", () => {
             state.is3d = !state.is3d;
-            document.getElementById("btnToggle3D").textContent = state.is3d ? "Switch to 2D View" : "Switch to 3D View";
+            document.getElementById("btnToggle3D").textContent = state.is3d ? "Switch to 2D" : "Switch to 3D";
             renderTasteMapPlot();
         });
         document.getElementById("btnResetMapFilter").addEventListener("click", () => {
             document.getElementById("mapSearchBox").value = "";
             document.getElementById("mapWeightSlider").value = "0";
-            renderTasteMapPlot();
+            applyTasteMapFilter();
         });
         document.getElementById("clusterCardsGrid").addEventListener("click", (e) => {
             const renameBtn = e.target.closest(".rename-cluster-btn");
