@@ -30,6 +30,7 @@ Thumbs.db
 01_Data_Extractor/.cache
 01_Data_Extractor/.reccobeats_cache.json
 01_Data_Extractor/deezer_cache.json
+01_Data_Extractor/deezer_album_genres_cache.json
 01_Data_Extractor/audio_dsp_cache.json
 ytm_browser.json
 ytm_oauth.json

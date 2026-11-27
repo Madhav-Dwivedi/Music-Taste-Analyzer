@@ -633,6 +633,21 @@ class TestNewStudioUpgrades(unittest.TestCase):
 
 
 class TestWebServerIntegration(unittest.TestCase):
+    def test_audio_preview_endpoint_returns_cached_audio_without_youtube_embedding(self):
+        entry = {
+            "found": True, "v": 2,
+            "preview_url": "https://example.com/preview.mp3",
+            "title": "The Devil Went Down to Georgia", "artist": "The Charlie Daniels Band",
+        }
+        fp = utils.get_track_fingerprint(entry["title"], entry["artist"])
+        with patch("deezer_audio_client.load_deezer_cache", return_value={fp: entry}):
+            status, _, body = self._req(
+                "/api/preview-audio?title=The%20Devil%20Went%20Down%20to%20Georgia&artist=The%20Charlie%20Daniels%20Band"
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["found"])
+        self.assertEqual(json.loads(body)["preview_url"], entry["preview_url"])
+
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.prefs_file = os.path.join(self.tmpdir.name, "user_preferences.json")

@@ -604,6 +604,352 @@ def fit_hdbscan_clusters(embeddings, weights, umap_dims=10, min_cluster_ratio=0.
     return labels, np.vstack(centers), probs, {}
 
 
+def _format_macro_title(macro_name):
+    """Format a canonical macro-genre key into a clean display title."""
+    special = {
+        "dance pop": "Dance-Pop & Synthpop",
+        "traditional pop": "Traditional Pop & Standards",
+        "alternative / indie": "Alternative & Indie",
+        "r&b": "R&B",
+        "soul / funk": "Soul & Funk",
+        "electronic / edm": "Electronic & EDM",
+        "ambient / lo-fi": "Ambient & Lo-Fi",
+        "soundtrack": "Soundtrack & OST",
+        "folk / singer-songwriter": "Folk & Singer-Songwriter",
+        "latin": "Latin & Reggaeton",
+        "reggae / caribbean": "Reggae & Caribbean",
+        "k-pop": "K-Pop",
+        "j-pop / city pop": "J-Pop & City Pop",
+        "afrobeats / african": "Afrobeats & African",
+        "indian / bollywood": "Indian & Bollywood",
+        "world / traditional": "World & Traditional",
+        "comedy / novelty": "Comedy & Novelty",
+    }
+    low = str(macro_name or "").strip().lower()
+    return special.get(low, low.title() if low else "Music")
+
+
+def fit_hierarchical_macro_clusters(
+    embeddings,
+    weights,
+    track_ids,
+    metadata,
+    min_macro_ratio=0.03,
+    attach_threshold=0.30,
+    refine_margin=0.10,
+    cohesion_floor=0.18,
+):
+    """
+    Hybrid Level-1 macro-genre clustering:
+    1. Keep universal macro-genres with >= max(25, min_macro_ratio * N) tracks.
+    2. Fold rare/missing-macro tracks into nearest macro centroid in centered 512-D CLAP space (>= attach_threshold).
+    3. Run 1 light centroid refinement pass (move only if another macro beats current by >= refine_margin).
+    Falls back to GMM if fewer than 2 macro-genres qualify.
+    """
+    import numpy as np
+
+    mat = np.asarray(embeddings, dtype=float)
+    n_samples = len(mat)
+    w_arr = np.asarray(weights, dtype=float)
+    if len(w_arr) != n_samples or float(w_arr.sum()) <= 0.0:
+        w_arr = np.ones(n_samples, dtype=float)
+
+    if n_samples < 30:
+        lbls, ctrs, prbs, _ = fit_gmm_clusters(mat, w_arr, min_k=2, max_k=min(6, max(2, n_samples - 1)))
+        return lbls, ctrs, prbs, {}
+
+    try:
+        from clap_embedder import map_tags_to_macro_genres
+    except Exception:
+        map_tags_to_macro_genres = lambda _t: []
+
+    raw_macros = []
+    macro_counts = {}
+    for tid in track_ids:
+        info = metadata.get(str(tid), {})
+        m = str(info.get("macro_genre") or "").strip().lower()
+        g_low = str(info.get("genres") or "").lower()
+        if not m and g_low:
+            mapped = map_tags_to_macro_genres(g_low)
+            m = mapped[0] if mapped else ""
+        raw_macros.append(m)
+        if m:
+            macro_counts[m] = macro_counts.get(m, 0) + 1
+
+    min_macro_size = max(18, int(float(min_macro_ratio) * n_samples)) if n_samples >= 120 else max(6, n_samples // 10)
+    kept_macros = [m for m, cnt in sorted(macro_counts.items(), key=lambda x: -x[1]) if cnt >= min_macro_size]
+    if len(kept_macros) < 2:
+        lbls, ctrs, prbs, _ = fit_gmm_clusters(mat, w_arr, min_k=3, max_k=8)
+        return lbls, ctrs, prbs, {}
+
+    mat_c = mat - np.mean(mat, axis=0, keepdims=True)
+    norms = np.linalg.norm(mat_c, axis=1, keepdims=True)
+    mat_c = mat_c / np.where(norms > 1e-9, norms, 1.0)
+
+    # Unweighted centroids prevent high-recency artists from warping a genre's acoustic center
+    def _compute_centered_centroids(assign_arr, k_count):
+        ctrs = []
+        for c in range(k_count):
+            mask = assign_arr == c
+            if not np.any(mask):
+                ctrs.append(np.zeros(mat_c.shape[1], dtype=float))
+                continue
+            cv = np.mean(mat_c[mask], axis=0)
+            cn = float(np.linalg.norm(cv))
+            ctrs.append(cv / cn if cn > 0 else cv)
+        return np.vstack(ctrs)
+
+    macro_to_id = {m: idx for idx, m in enumerate(kept_macros)}
+    # Editorial/lyrical categories like Comedy & Novelty span every musical style;
+    # never let their acoustic centroid attract non-comedy tracks during folding or refinement.
+    editorial_only_ids = {idx for idx, m in enumerate(kept_macros) if m in ("comedy / novelty",)}
+    init_labels = np.array([macro_to_id.get(m, -1) for m in raw_macros], dtype=int)
+    c_mat = _compute_centered_centroids(init_labels, len(kept_macros))
+
+    def _masked_sims(sim_matrix):
+        if not editorial_only_ids or len(editorial_only_ids) >= sim_matrix.shape[1]:
+            return sim_matrix
+        out = sim_matrix.copy()
+        for eid in editorial_only_ids:
+            out[:, eid] = -2.0
+        return out
+
+    # Fold rare/missing-macro tracks into nearest acoustic macro centroid
+    sims = _masked_sims(mat_c @ c_mat.T)
+    labels = init_labels.copy()
+    for i in range(n_samples):
+        if labels[i] < 0:
+            best_j = int(np.argmax(sims[i]))
+            if float(sims[i, best_j]) >= float(attach_threshold):
+                labels[i] = best_j
+
+    # 2-pass light centroid refinement: snap acoustically mislabeled tracks cleanly as continents settle
+    for _ in range(2):
+        c_mat2 = _compute_centered_centroids(labels, len(kept_macros))
+        raw_sims2 = mat_c @ c_mat2.T
+        sims2 = _masked_sims(raw_sims2)
+        changed = 0
+        for i in range(n_samples):
+            if labels[i] >= 0:
+                if labels[i] in editorial_only_ids:
+                    continue
+                best_j = int(np.argmax(sims2[i]))
+                cur_s = float(raw_sims2[i, labels[i]])
+                best_s = float(sims2[i, best_j])
+                if best_j != labels[i] and best_s >= cur_s + float(refine_margin):
+                    labels[i] = best_j
+                    changed += 1
+                elif cur_s < float(cohesion_floor):
+                    labels[i] = -1
+                    changed += 1
+        if changed == 0:
+            break
+
+    # Compact surviving clusters
+    kept_cids = sorted(c for c in range(len(kept_macros)) if int(np.sum(labels == c)) > 0)
+    if len(kept_cids) < 2:
+        lbls, ctrs, prbs, _ = fit_gmm_clusters(mat, w_arr, min_k=3, max_k=8)
+        return lbls, ctrs, prbs, {}
+
+    remap = {old_c: new_c for new_c, old_c in enumerate(kept_cids)}
+    labels = np.array([remap[c] if c in remap else -1 for c in labels], dtype=int)
+    macro_names = {}
+    for old_c in kept_cids:
+        new_c = remap[old_c]
+        raw_m = kept_macros[old_c]
+        title = _format_macro_title(raw_m)
+        if raw_m == "jazz":
+            c_idx = np.where(labels == new_c)[0]
+            trad_cnt = sum(1 for i in c_idx if "traditional pop" in str(metadata.get(str(track_ids[i]), {}).get("genres") or "").lower())
+            if trad_cnt >= max(8, int(0.20 * len(c_idx))):
+                title = "Jazz & Standards"
+        elif raw_m == "soundtrack / ambient":
+            c_idx = np.where(labels == new_c)[0]
+            cls_cnt = sum(1 for i in c_idx if "classical" in str(metadata.get(str(track_ids[i]), {}).get("genres") or "").lower())
+            if cls_cnt >= max(8, int(0.15 * len(c_idx))):
+                title = "Classical & Soundtrack"
+        macro_names[new_c] = title
+    n_out = len(kept_cids)
+
+    final_c_mat = _compute_centered_centroids(labels, n_out)
+    final_sims = mat_c @ final_c_mat.T
+    centers = []
+    probs = np.zeros((n_samples, n_out), dtype=float)
+    for cid in range(n_out):
+        mask = labels == cid
+        cw = w_arr[mask]
+        c_vec = np.average(mat[mask], axis=0, weights=cw) if float(cw.sum()) > 1e-9 else np.mean(mat[mask], axis=0)
+        cn = float(np.linalg.norm(c_vec))
+        centers.append(c_vec / cn if cn > 0 else c_vec)
+
+    for i in range(n_samples):
+        if labels[i] >= 0:
+            probs[i, labels[i]] = float(np.clip(final_sims[i, labels[i]], 0.05, 1.0))
+
+    return labels, np.vstack(centers), probs, macro_names
+
+
+def _build_subvibe_label(sid, top_genres, telemetry, parent_macro_label, used_names):
+    """Build a clean genre/acoustic sub-vibe title without obscure '(Artist Style)' suffixes."""
+    clean_genres = []
+    seen_g = set()
+    for g in top_genres or []:
+        g_clean = str(g or "").strip()
+        if g_clean and g_clean.lower() not in seen_g:
+            seen_g.add(g_clean.lower())
+            clean_genres.append(g_clean)
+
+    t = telemetry or {}
+    energy = t.get("avg_energy")
+    valence = t.get("avg_valence")
+    acoustic = t.get("avg_acousticness")
+    mood = ""
+    if isinstance(acoustic, (int, float)) and acoustic >= 0.65:
+        mood = "Acoustic"
+    elif isinstance(energy, (int, float)) and energy >= 0.85:
+        mood = "High-Energy"
+    elif isinstance(energy, (int, float)) and energy <= 0.58:
+        mood = "Mellow"
+    elif isinstance(valence, (int, float)) and valence >= 0.55:
+        mood = "Upbeat"
+    elif isinstance(valence, (int, float)) and valence <= 0.40:
+        mood = "Moody"
+
+    if len(clean_genres) >= 2:
+        title = f"{clean_genres[0]} & {clean_genres[1]}"
+    elif len(clean_genres) == 1:
+        title = f"{mood} {clean_genres[0]}".strip() if mood else clean_genres[0]
+    else:
+        title = f"{mood} {parent_macro_label}".strip() if mood else f"{parent_macro_label} Pocket {sid + 1}"
+
+    if title.lower() in used_names:
+        if mood and mood.lower() not in title.lower():
+            title = f"{mood} {clean_genres[0]}" if clean_genres else f"{mood} {parent_macro_label}"
+    base = title
+    suffix = 2
+    while title.lower() in used_names:
+        title = f"{base} #{suffix}"
+        suffix += 1
+    used_names.add(title.lower())
+    return title
+
+
+def fit_subclusters_for_macro(
+    cluster_idx,
+    kept_embeddings,
+    weights,
+    kept_track_ids,
+    metadata,
+    parent_macro_label,
+    total_weight_sum,
+    global_genre_counts,
+):
+    """Discover 2-4 clean acoustic sub-vibes inside a Level-1 macro cluster for interactive drill-down."""
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    n_sub = len(cluster_idx)
+    if n_sub < 24:
+        return [], {}
+
+    sub_emb = kept_embeddings[cluster_idx]
+    sub_c = sub_emb - np.mean(sub_emb, axis=0, keepdims=True)
+    norms = np.linalg.norm(sub_c, axis=1, keepdims=True)
+    sub_c = sub_c / np.where(norms > 1e-9, norms, 1.0)
+
+    max_sk = min(4, max(2, n_sub // 18))
+    min_sub_size = max(8, int(0.12 * n_sub))
+    best_km = None
+    best_score = -2.0
+    for sk in range(2, max_sk + 1):
+        km = KMeans(n_clusters=sk, random_state=42, n_init=10).fit(sub_c)
+        counts = np.bincount(km.labels_, minlength=sk)
+        if int(np.min(counts)) < min_sub_size:
+            continue
+        score = float(silhouette_score(sub_c, km.labels_, metric="cosine"))
+        if score > best_score:
+            best_score = score
+            best_km = km
+
+    if best_km is None or best_score < 0.08:
+        return [], {}
+
+    sub_labels = best_km.labels_
+    n_k = int(best_km.n_clusters)
+    parent_low = str(parent_macro_label or "").strip().lower()
+    parent_tokens = {w for w in parent_low.replace("&", " ").replace("/", " ").split() if len(w) > 2}
+
+    # Compute parent-local genre counts so sub-vibe TF-IDF highlights what DISTINGUISHES sibling sub-vibes
+    parent_genre_counts = {}
+    for gp in cluster_idx:
+        tid = kept_track_ids[gp]
+        for g in {x.strip().lower() for x in str(metadata[tid].get("genres") or "").split(",") if x.strip()}:
+            parent_genre_counts[g] = parent_genre_counts.get(g, 0) + 1
+
+    subclusters_out = []
+    tid_to_sub_id = {}
+    used_sub_names = set()
+    used_sub_artists = set()
+
+    for sid in range(n_k):
+        local_pos = np.where(sub_labels == sid)[0]
+        if len(local_pos) == 0:
+            continue
+        global_pos = cluster_idx[local_pos]
+        for gp in global_pos:
+            tid_to_sub_id[kept_track_ids[gp]] = sid
+
+        sw = weights[global_pos]
+        s_center = np.mean(kept_embeddings[global_pos], axis=0)
+        sn = float(np.linalg.norm(s_center))
+        if sn > 0:
+            s_center = s_center / sn
+
+        genre_freq = {}
+        for gp in global_pos:
+            tid = kept_track_ids[gp]
+            for g in {x.strip().lower() for x in str(metadata[tid].get("genres") or "").split(",") if x.strip()}:
+                if g == parent_low or (parent_tokens and g in parent_tokens):
+                    continue
+                genre_freq[g] = genre_freq.get(g, 0.0) + 1.0
+        tfidf = {
+            g: (freq / max(1.0, float(len(global_pos))))
+            * (0.35 + max(0.0, math.log((n_sub + 1.0) / (parent_genre_counts.get(g, 1) + 1.0))))
+            for g, freq in genre_freq.items()
+        }
+        top_g = [g.title() for g, _ in sorted(tfidf.items(), key=lambda x: x[1], reverse=True)[:3]]
+
+        sims = cosine_similarity([s_center], kept_embeddings[global_pos])[0]
+        top_local = np.argsort(sims)[::-1][:5]
+        anchors = [
+            {
+                "name": metadata[kept_track_ids[global_pos[li]]]["name"],
+                "artist": metadata[kept_track_ids[global_pos[li]]]["artists"],
+                "similarity": round(float(sims[li]), 3),
+            }
+            for li in top_local
+        ]
+
+        telemetry = _compute_cluster_telemetry(global_pos, kept_track_ids, metadata)
+        sub_title = _build_subvibe_label(sid, top_g, telemetry, parent_macro_label, used_sub_names)
+        subclusters_out.append(
+            {
+                "sub_cluster_id": sid,
+                "vibe_label": sub_title,
+                "top_genres": top_g,
+                "track_count": int(len(global_pos)),
+                "raw_percentage": round((len(global_pos) / float(n_sub)) * 100.0, 1),
+                "weighted_share_pct": round((float(sw.sum()) / max(1e-9, total_weight_sum)) * 100.0, 1),
+                "anchor_tracks": anchors,
+                "telemetry": telemetry,
+            }
+        )
+
+    return subclusters_out, tid_to_sub_id
+
+
 def build_vibe_label(cluster_id, top_genre_names, anchor_tracks, cluster_size, used_labels, used_artists):
     """Construct a human-readable, guaranteed-unique vibe title for a cluster."""
     artist_counts = {}
@@ -905,9 +1251,9 @@ def main():
     )
     parser.add_argument(
         "--method",
-        choices=["auto", "hdbscan", "gmm", "kmeans"],
+        choices=["auto", "hierarchical", "hdbscan", "gmm", "kmeans"],
         default="auto",
-        help="Clustering algorithm: hdbscan (UMAP+HDBSCAN with outliers), gmm (PCA+GMM+BIC), or kmeans (default: auto)",
+        help="Clustering algorithm: hierarchical (macro-genres + sub-vibes), hdbscan, gmm, or kmeans (default: auto)",
     )
     parser.add_argument("--k", type=int, default=None, help="Optional fixed number of clusters")
     parser.add_argument("--no-llm-names", action="store_true", help="Skip batched Ollama cluster naming")
@@ -1021,9 +1367,9 @@ def main():
     )
 
     cluster_method = (
-        getattr(config, "DEFAULT_CLUSTER_METHOD", "hdbscan") if args.method == "auto" else args.method
+        getattr(config, "DEFAULT_CLUSTER_METHOD", "hierarchical") if args.method == "auto" else args.method
     )
-    if args.k is not None and cluster_method == "hdbscan":
+    if args.k is not None and cluster_method in ("hdbscan", "hierarchical"):
         cluster_method = "gmm"
     min_k = int(getattr(config, "MIN_CLUSTERS", 3))
     max_k = int(getattr(config, "MAX_CLUSTERS", 14))
@@ -1031,7 +1377,21 @@ def main():
     pca_dims = int(getattr(config, "GMM_PCA_DIMS", 20))
 
     probs = None
-    if cluster_method == "hdbscan":
+    macro_names_by_cid = {}
+    if cluster_method == "hierarchical":
+        min_macro_ratio = float(getattr(config, "MACRO_MIN_CLUSTER_RATIO", 0.03))
+        print("\n[3/3] Analyzing Taste Macro-Genres & Sub-Vibes (Hybrid CLAP + Global Taxonomy)...")
+        labels, cluster_centers, probs, macro_names_by_cid = fit_hierarchical_macro_clusters(
+            kept_embeddings,
+            weights,
+            kept_track_ids,
+            metadata,
+            min_macro_ratio=min_macro_ratio,
+        )
+        n_clusters = len(cluster_centers)
+        noise_cnt = int(np.sum(labels < 0))
+        print(f"      -> Discovered {n_clusters} macro-genre clusters ({noise_cnt} unclustered / eclectic tracks)")
+    elif cluster_method == "hdbscan":
         umap_dims = int(getattr(config, "HDBSCAN_UMAP_DIMS", 10))
         min_ratio = float(getattr(config, "HDBSCAN_MIN_CLUSTER_RATIO", 0.018))
         print(f"\n[3/3] Analyzing Taste Sub-Clusters (UMAP-{umap_dims} + HDBSCAN Density)...")
@@ -1140,7 +1500,7 @@ def main():
                 }
             )
 
-        auto_vibe_title = build_vibe_label(
+        auto_vibe_title = macro_names_by_cid.get(raw_cid) or build_vibe_label(
             seq_cid,
             top_genre_names,
             anchor_tracks,
@@ -1150,6 +1510,19 @@ def main():
         )
         vibe_title = custom_labels.get(str(seq_cid)) or auto_vibe_title
         telemetry = _compute_cluster_telemetry(cluster_idx, kept_track_ids, metadata)
+
+        subclusters_out, sub_assign = fit_subclusters_for_macro(
+            cluster_idx,
+            kept_embeddings,
+            weights,
+            kept_track_ids,
+            metadata,
+            auto_vibe_title,
+            total_weight_sum,
+            global_genre_counts,
+        )
+        for s_tid, s_id in sub_assign.items():
+            metadata[s_tid]["sub_cluster_id"] = int(s_id)
 
         clusters_out.append(
             {
@@ -1163,10 +1536,11 @@ def main():
                 "anchor_tracks": anchor_tracks,
                 "centroid_vector": center.tolist(),
                 "telemetry": telemetry,
+                "subclusters": subclusters_out,
             }
         )
 
-    if not args.no_llm_names:
+    if not args.no_llm_names and not macro_names_by_cid:
         if name_clusters_with_ollama(clusters_out, prefs=prefs, custom_labels=custom_labels):
             print("      -> Refined cluster names with local Ollama LLM")
 

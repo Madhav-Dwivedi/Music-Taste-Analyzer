@@ -173,6 +173,12 @@ Run the unit & integration test suite (all network/model calls are cleanly mocke
 python -X utf8 -m unittest discover -s tests -v
 ```
 
+Run the UI regression tests with Node.js (no npm packages required):
+
+```bash
+node --test tests/test_preview.js tests/test_map.js
+```
+
 UTF-8 mode keeps emoji log output working on Windows. Older vector caches are rebuilt once on the next Stage 2 refresh to store vectors before playlist blending.
 
 ---

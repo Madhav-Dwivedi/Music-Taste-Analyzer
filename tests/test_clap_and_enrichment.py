@@ -273,6 +273,136 @@ class TestClapAndEnrichment(unittest.TestCase):
         self.assertEqual(probs.shape, (len(embs), len(centers)))
         self.assertTrue(np.any(labels == -1))
 
+    def test_map_tags_to_macro_genres_covers_global_taxonomy(self):
+        import clap_embedder
+
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["Rap/Hip Hop"]), ["hip hop"])
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["Films/Games"]), ["soundtrack"])
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["adult standards", "vocal jazz"]), ["traditional pop", "jazz"])
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["synthpop", "dance pop"]), ["dance pop"])
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["Afrobeats", "K-Pop"]), ["afrobeats / african", "k-pop"])
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["Reggaeton", "Cumbia"]), ["latin"])
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["Drum & Bass", "House"]), ["electronic / edm"])
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["Thrash Metal", "Shoegaze"]), ["metal", "alternative / indie"])
+        self.assertEqual(clap_embedder.map_tags_to_macro_genres(["Bluegrass", "Delta Blues"]), ["country", "blues"])
+
+    def test_tag_audio_embeddings_scopes_subgenres_to_macro_hint(self):
+        import clap_embedder
+
+        n_tags = len(clap_embedder.TAG_BANK)
+        fake_mat = np.eye(n_tags, 512, dtype=np.float32)
+        # Find indices of a jazz subgenre and a metal subgenre
+        labels = [clap_embedder._TAG_DISPLAY_LABELS[p] for p in clap_embedder.TAG_BANK]
+        metal_idx = labels.index("heavy metal")
+        jazz_idx = labels.index("vocal jazz")
+
+        # Audio vector points mostly to heavy metal, slightly to vocal jazz
+        audio = np.zeros((1, 512), dtype=np.float32)
+        audio[0, metal_idx] = 0.9
+        audio[0, jazz_idx] = 0.3
+
+        with patch.object(clap_embedder, "_CACHED_TAG_MATRIX", None), patch.object(
+            clap_embedder, "_CACHED_SUB_MATRICES", None
+        ), patch.object(clap_embedder, "embed_texts_clap", return_value=fake_mat):
+            # With macro_hint=["jazz"], it MUST stay inside jazz and never emit heavy metal
+            scoped = clap_embedder.tag_audio_embeddings(audio, None, None, top_k=3, macro_hints=[["jazz"]])
+            self.assertEqual(scoped[0][0], "jazz")
+            self.assertIn("vocal jazz", scoped[0])
+            self.assertNotIn("heavy metal", scoped[0])
+
+            # Without macro_hint, bottom-up rollup selects heavy metal -> metal
+            unscoped = clap_embedder.tag_audio_embeddings(audio, None, None, top_k=3)
+            self.assertEqual(unscoped[0][0], "metal")
+            self.assertIn("heavy metal", unscoped[0])
+
+    def test_fetch_deezer_album_genres_caches_and_filters_all(self):
+        cache = {}
+        fake_payload = {"genres": {"data": [{"id": 0, "name": "All"}, {"id": 129, "name": "Jazz"}, {"id": 132, "name": "Pop"}]}}
+        with patch.object(dz, "_polite_deezer_get", return_value=fake_payload) as mock_get:
+            g1 = dz.fetch_deezer_album_genres(12345, cache=cache)
+            g2 = dz.fetch_deezer_album_genres(12345, cache=cache)
+            mock_get.assert_called_once()
+        self.assertEqual(g1, ["Jazz", "Pop"])
+        self.assertEqual(g2, ["Jazz", "Pop"])
+
+    def test_fit_hierarchical_macro_clusters_and_subclusters(self):
+        rng = np.random.RandomState(41)
+        dim = 32
+        tids = []
+        meta = {}
+        pts = []
+        # 3 major macro-genres (30 tracks each, with 2 distinct sub-pockets in 'jazz') + 4 rare 'blues' tracks
+        base_dirs = np.eye(6, dim, dtype=float)
+        for idx in range(30):
+            tid = f"j{idx}"
+            sub_dir = base_dirs[0] if idx < 15 else (0.8 * base_dirs[0] + 0.6 * base_dirs[4])
+            vec = sub_dir + rng.normal(0.0, 0.03, size=dim)
+            vec /= np.linalg.norm(vec)
+            pts.append(vec)
+            tids.append(tid)
+            meta[tid] = {
+                "name": f"Jazz Song {idx}",
+                "artists": "Sinatra" if idx < 15 else "Laufey",
+                "macro_genre": "jazz",
+                "genres": "jazz, swing / big band" if idx < 15 else "jazz, bossa nova",
+            }
+        for m_idx, m_name in [(1, "hip hop"), (2, "rock")]:
+            for idx in range(30):
+                tid = f"{m_name}_{idx}"
+                vec = base_dirs[m_idx] + rng.normal(0.0, 0.03, size=dim)
+                vec /= np.linalg.norm(vec)
+                pts.append(vec)
+                tids.append(tid)
+                meta[tid] = {
+                    "name": f"{m_name} {idx}",
+                    "artists": f"Artist {m_name}",
+                    "macro_genre": m_name,
+                    "genres": m_name,
+                }
+        # 4 rare 'blues' tracks acoustically near rock -> should fold into rock instead of creating a 4-track cluster
+        for idx in range(4):
+            tid = f"b{idx}"
+            vec = 0.85 * base_dirs[2] + 0.52 * base_dirs[5]
+            vec /= np.linalg.norm(vec)
+            pts.append(vec)
+            tids.append(tid)
+            meta[tid] = {"name": f"Blues {idx}", "artists": "BB", "macro_genre": "blues", "genres": "blues"}
+
+        embs = np.vstack(pts)
+        weights = np.ones(len(embs), dtype=float)
+        labels, centers, probs, macro_names = taste_clusterer.fit_hierarchical_macro_clusters(
+            embs, weights, tids, meta, min_macro_ratio=0.10
+        )
+        self.assertEqual(len(centers), 3)
+        self.assertEqual(set(macro_names.values()), {"Jazz", "Hip Hop", "Rock"})
+        self.assertEqual(probs.shape, (len(embs), 3))
+        # Rare blues tracks folded into Rock (not left as a 4-track cluster)
+        rock_cid = [cid for cid, name in macro_names.items() if name == "Rock"][0]
+        self.assertTrue(all(labels[-4:] == rock_cid))
+
+        # Level-2 subclusters inside Jazz should split into 2 distinct sub-vibes
+        jazz_cid = [cid for cid, name in macro_names.items() if name == "Jazz"][0]
+        jazz_idx = np.where(labels == jazz_cid)[0]
+        subs, sub_assign = taste_clusterer.fit_subclusters_for_macro(
+            jazz_idx, embs, weights, tids, meta, "Jazz", float(weights.sum()), {"swing / big band": 15, "bossa nova": 15}
+        )
+        self.assertEqual(len(subs), 2)
+        self.assertEqual(len(sub_assign), len(jazz_idx))
+
+    def test_inherit_artist_genres_fills_previewless_tracks(self):
+        tids = ["t1", "t2", "t3", "t4"]
+        meta = {
+            "t1": {"name": "Top Down", "artists": "Pete & Bas", "macro_genre": "hip hop", "genres": "rap/hip hop, hip hop, classic hip hop"},
+            "t2": {"name": "Stay Shining", "artists": "Pete & Bas", "macro_genre": "hip hop", "genres": "rap/hip hop, hip hop, trap"},
+            "t3": {"name": "Numbers", "artists": "Pete & Bas", "genres": ""},
+            "t4": {"name": "Unknown Track", "artists": "Someone New", "genres": ""},
+        }
+        cnt = npu_vectorizer.inherit_artist_genres(tids, meta)
+        self.assertEqual(cnt, 1)
+        self.assertEqual(meta["t3"]["macro_genre"], "hip hop")
+        self.assertIn("hip hop", meta["t3"]["genres"])
+        self.assertEqual(meta["t4"]["genres"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@
         currentPlaylist: null,
         mapData: null,
         is3d: false,
+        drillClusterId: null,
         analytics: null,
         sse: null,
         feedback: { liked: {}, disliked: {} },
@@ -24,6 +25,7 @@
         statusInFlight: false,
         mapFilterTimer: null,
         mapTraceIndex: [],
+        mapMaxWeight: 0,
     };
 
     const CLUSTER_COLORS = [
@@ -55,18 +57,47 @@
         return "";
     }
 
-    function escapeHtml(val) {
-        return String(val ?? "")
+    function escapeHtml(val, quote = true) {
+        const text = String(val ?? "")
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#39;");
+            .replace(/>/g, "&gt;");
+        return quote ? text.replace(/"/g, "&quot;").replace(/'/g, "&#39;") : text;
+    }
+
+    function plotlyText(val) {
+        // Plotly renders SVG text, where HTML quote entities are displayed literally.
+        const lines = String(val ?? "").replace(/\s+/g, " ").match(/.{1,48}(?:\s|$)|\S{1,48}/gu) || [];
+        return lines.map((line) => escapeHtml(line.trim(), false)).join("<br>");
     }
 
     function safeHttpUrl(raw) {
         const s = String(raw || "").trim();
         return /^https?:\/\//i.test(s) ? s : "";
+    }
+
+    let youtubeApiPromise;
+    function loadYoutubeApi() {
+        if (window.YT?.Player) return Promise.resolve(window.YT);
+        if (!youtubeApiPromise) {
+            youtubeApiPromise = new Promise((resolve, reject) => {
+                const fail = () => {
+                    clearTimeout(timer);
+                    youtubeApiPromise = null;
+                    reject(new Error("YouTube player could not load."));
+                };
+                const timer = setTimeout(fail, 12000);
+                window.onYouTubeIframeAPIReady = () => {
+                    clearTimeout(timer);
+                    resolve(window.YT);
+                };
+                const script = document.createElement("script");
+                script.src = "https://www.youtube.com/iframe_api";
+                script.onerror = fail;
+                document.head.appendChild(script);
+            });
+        }
+        return youtubeApiPromise;
     }
 
     async function openPreviewTrack(trackOrId, title) {
@@ -105,19 +136,58 @@
         }
 
         const preferYtm = Boolean(vid && (!spId || state.activeProvider === "ytmusic" || prov === "ytmusic"));
+        closePreviewDock();
+        const mySeq = state.previewSeq;
         const iframe = document.getElementById("previewIframe");
+        const youtubeWrap = document.getElementById("previewYoutubeWrap");
         const audioWrap = document.getElementById("previewAudioWrap");
         const audioEl = document.getElementById("previewAudio");
         const audioMeta = document.getElementById("previewAudioMeta");
         const extLink = document.getElementById("previewExternalLink");
-        const ytmEmbedUrl = (videoId) =>
-            `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&origin=${encodeURIComponent(window.location.origin)}`;
+        const notice = document.getElementById("previewEmbedNotice");
+        const titleEl = document.getElementById("previewTrackTitle");
+        titleEl.textContent = label;
+        titleEl.title = label;
 
-        const mySeq = (state.previewSeq = (state.previewSeq || 0) + 1);
-        audioEl.pause();
-        audioEl.removeAttribute("src");
-        audioEl.load();
-        iframe.src = "about:blank";
+        let fallbackStarted = false;
+        const useAudioFallback = async (reason) => {
+            if (state.previewSeq !== mySeq || fallbackStarted) return;
+            fallbackStarted = true;
+            state.youtubePlayer?.destroy();
+            state.youtubePlayer = null;
+            youtubeWrap.replaceChildren();
+            youtubeWrap.style.display = "none";
+            notice.textContent = reason;
+            notice.style.display = "block";
+            const unavailable = () => {
+                if (state.previewSeq !== mySeq) return;
+                audioEl.onerror = null;
+                audioEl.pause();
+                audioEl.removeAttribute("src");
+                audioEl.load();
+                audioWrap.style.display = "none";
+                notice.textContent = `${reason} No audio preview available. Use Open in YT Music above.`;
+            };
+            if (!trackName) return unavailable();
+            audioWrap.style.display = "flex";
+            audioMeta.textContent = "Loading fallback audio preview…";
+            try {
+                const qs = new URLSearchParams({ title: trackName, artist: trackArtist });
+                const res = await apiJson(`/api/preview-audio?${qs.toString()}`);
+                if (state.previewSeq !== mySeq) return;
+                const previewUrl = safeHttpUrl(res?.preview_url);
+                if (res?.found && previewUrl) {
+                    audioMeta.textContent = `30s audio preview${res.album ? ` · ${res.album}` : ""}`;
+                    audioEl.onerror = unavailable;
+                    audioEl.src = previewUrl;
+                    audioEl.load();
+                    return;
+                }
+            } catch {
+                if (state.previewSeq !== mySeq) return;
+            }
+            unavailable();
+        };
 
         if (extLink) {
             const extHref = preferYtm && vid
@@ -132,34 +202,47 @@
             }
         }
 
-        if ((preferYtm || (!spId && vid)) && trackName) {
-            document.getElementById("previewTrackTitle").textContent = label;
-            iframe.style.display = "none";
-            audioWrap.style.display = "flex";
-            audioMeta.textContent = "Loading 30s audio preview…";
+        if (preferYtm) {
+            youtubeWrap.style.display = "block";
+            notice.textContent = "Loading YouTube preview…";
+            notice.style.display = "block";
             document.getElementById("previewDock").style.display = "block";
             try {
-                const qs = new URLSearchParams({ title: trackName, artist: trackArtist });
-                const res = await api(`/api/preview-audio?${qs.toString()}`);
+                const yt = await loadYoutubeApi();
                 if (state.previewSeq !== mySeq) return;
-                if (res?.found && res.preview_url) {
-                    audioMeta.textContent = `30s audio preview${res.album ? ` · ${res.album}` : ""}`;
-                    audioEl.src = res.preview_url;
-                    audioEl.play().catch(() => {});
-                    return;
-                }
+                const mount = document.createElement("div");
+                youtubeWrap.replaceChildren(mount);
+                state.youtubePlayer = new yt.Player(mount, {
+                    width: "100%",
+                    height: "200",
+                    videoId: vid,
+                    playerVars: { autoplay: 0, rel: 0, playsinline: 1, origin: window.location.origin },
+                    events: {
+                        onReady: () => {
+                            if (state.previewSeq === mySeq && !fallbackStarted) notice.style.display = "none";
+                        },
+                        onError: (event) => {
+                            if (state.previewSeq !== mySeq) return;
+                            const code = Number(event.data);
+                            const reasons = {
+                                2: "Invalid YouTube video ID or player parameter.",
+                                5: "YouTube could not play this video in the browser.",
+                                100: "This YouTube video was removed or is private.",
+                                101: "This upload does not allow embedded playback.",
+                                150: "This upload does not allow embedded playback.",
+                                153: "YouTube could not identify this app (missing referrer/client information).",
+                            };
+                            const reason = `YouTube error ${code}: ${reasons[code] || "Playback failed."}`;
+                            notice.dataset.youtubeError = String(code);
+                            console.warn("[Preview]", reason, { videoId: vid, title: label });
+                            return useAudioFallback(reason);
+                        },
+                    },
+                });
             } catch {
                 if (state.previewSeq !== mySeq) return;
+                await useAudioFallback("YouTube player could not load.");
             }
-            if (vid) {
-                audioWrap.style.display = "none";
-                iframe.style.display = "block";
-                iframe.height = "180";
-                iframe.referrerPolicy = "strict-origin-when-cross-origin";
-                iframe.src = ytmEmbedUrl(vid);
-                return;
-            }
-            audioMeta.textContent = "No audio preview available for this track.";
             return;
         }
 
@@ -172,30 +255,31 @@
             document.getElementById("previewDock").style.display = "block";
             return;
         }
-        if (vid) {
-            document.getElementById("previewTrackTitle").textContent = label;
-            audioWrap.style.display = "none";
-            iframe.style.display = "block";
-            iframe.height = "180";
-            iframe.referrerPolicy = "strict-origin-when-cross-origin";
-            iframe.src = ytmEmbedUrl(vid);
-            document.getElementById("previewDock").style.display = "block";
-            return;
-        }
         showToast("No valid Spotify ID or YouTube Music video ID available for preview.", "err");
     }
 
     function closePreviewDock() {
         state.previewSeq = (state.previewSeq || 0) + 1;
+        state.youtubePlayer?.destroy();
+        state.youtubePlayer = null;
+        const youtubeWrap = document.getElementById("previewYoutubeWrap");
+        youtubeWrap.replaceChildren();
+        youtubeWrap.style.display = "none";
         const audioEl = document.getElementById("previewAudio");
         if (audioEl) {
+            audioEl.onerror = null;
             audioEl.pause();
             audioEl.removeAttribute("src");
             audioEl.load();
         }
         document.getElementById("previewAudioWrap").style.display = "none";
         document.getElementById("previewDock").style.display = "none";
-        document.getElementById("previewIframe").src = "about:blank";
+        const iframe = document.getElementById("previewIframe");
+        iframe.src = "about:blank";
+        iframe.style.display = "none";
+        const notice = document.getElementById("previewEmbedNotice");
+        notice.style.display = "none";
+        delete notice.dataset.youtubeError;
     }
 
     async function handleSaveLibraryButton(btn) {
@@ -731,20 +815,28 @@
             emptyEl.style.display = "none";
             contentEl.style.display = "block";
             state.mapData = data;
+            state.drillClusterId = null;
 
-            const maxW = Math.max(20, Math.min(100, Math.round(Math.max(...data.tracks.map((t) => t.recency_weight || 1), 20))));
-            document.getElementById("mapWeightSlider").max = String(maxW);
+            state.mapMaxWeight = Math.max(0, ...data.tracks.map((t) => Number(t.recency_weight) || 0));
 
             const projMethod = (data.projection_method || "pca").toLowerCase();
             document.getElementById("mapProjectionBadge").textContent = projMethod.toUpperCase();
             document.getElementById("mapProjectionSelect").value = projMethod;
 
-            renderTasteMapPlot();
-            renderClusterRadar(data.clusters || []);
-            renderClusterCards(data.clusters || []);
+            syncMapDrillView();
         } catch (err) {
             showToast(err.message, "err");
         }
+    }
+
+    function getMapMinWeight() {
+        const slider = document.getElementById("mapWeightSlider");
+        const fraction = Number(slider.value || 0) / 1000;
+        // Expand the low end: most listening weights are fractions or below 20.
+        const weight = Number((0.1 * Math.expm1(fraction * Math.log1p(state.mapMaxWeight / 0.1))).toFixed(2));
+        document.getElementById("mapWeightVal").textContent = String(weight);
+        slider.setAttribute("aria-valuetext", `${weight} minimum weight`);
+        return weight;
     }
 
     function computeMapMarkerStyle(item, color, q, minW, is3d) {
@@ -789,8 +881,7 @@
             return;
         }
         const q = document.getElementById("mapSearchBox").value.trim().toLowerCase();
-        const minW = parseFloat(document.getElementById("mapWeightSlider").value || "0");
-        document.getElementById("mapWeightVal").textContent = String(minW);
+        const minW = getMapMinWeight();
         const hasFilter = Boolean(q || minW > 0);
 
         let matches = 0;
@@ -838,6 +929,17 @@
                 traceIndices
             )
         ).then(() => {
+            if (state.is3d) disableMesh3dPicking(plotEl);
+        });
+    }
+
+    function updateTasteMapClouds() {
+        const plotEl = document.getElementById("tasteMapPlot");
+        if (typeof Plotly === "undefined" || !plotEl?.data) return;
+        const indices = plotEl.data.flatMap((trace, idx) => trace.meta?.layer === "cluster-cloud" ? [idx] : []);
+        if (!indices.length) return;
+        const visible = document.getElementById("chkShowClouds").checked;
+        return Promise.resolve(Plotly.restyle(plotEl, { visible }, indices)).then(() => {
             if (state.is3d) disableMesh3dPicking(plotEl);
         });
     }
@@ -922,6 +1024,52 @@
         return hull;
     }
 
+    function getActiveDrillCluster() {
+        if (!state.mapData || state.drillClusterId === null || state.drillClusterId === undefined) return null;
+        return (state.mapData.clusters || []).find((c) => Number(c.cluster_id) === Number(state.drillClusterId)) || null;
+    }
+
+    function syncMapDrillView() {
+        const data = state.mapData;
+        if (!data) return;
+        const drillBar = document.getElementById("mapDrillBar");
+        const drillTitle = document.getElementById("mapDrillTitle");
+        const drillMeta = document.getElementById("mapDrillMeta");
+        const active = getActiveDrillCluster();
+
+        if (active && Array.isArray(active.subclusters) && active.subclusters.length) {
+            if (drillBar) drillBar.style.display = "flex";
+            if (drillTitle) drillTitle.textContent = `C${active.cluster_id}: ${active.vibe_label}`;
+            if (drillMeta) drillMeta.textContent = `${active.track_count} tracks · ${active.subclusters.length} sub-vibes`;
+            renderTasteMapPlot();
+            renderClusterRadar(active.subclusters.map((sc) => ({ ...sc, cluster_id: `S${sc.sub_cluster_id}` })));
+            renderClusterCards(active.subclusters, active);
+        } else {
+            state.drillClusterId = null;
+            if (drillBar) drillBar.style.display = "none";
+            renderTasteMapPlot();
+            renderClusterRadar(data.clusters || []);
+            renderClusterCards(data.clusters || [], null);
+        }
+    }
+
+    function enterClusterDrill(cid) {
+        const target = (state.mapData?.clusters || []).find((c) => Number(c.cluster_id) === Number(cid));
+        if (!target || !Array.isArray(target.subclusters) || !target.subclusters.length) {
+            showToast("This cluster does not have sub-vibes to zoom into.", "info");
+            return;
+        }
+        state.drillClusterId = Number(cid);
+        syncMapDrillView();
+        document.getElementById("tasteMapPlot")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    function exitClusterDrill() {
+        if (state.drillClusterId === null) return;
+        state.drillClusterId = null;
+        syncMapDrillView();
+    }
+
     function renderTasteMapPlot() {
         const data = state.mapData;
         if (!data) return;
@@ -932,67 +1080,90 @@
         }
         document.getElementById("mapOfflineBanner").style.display = "none";
 
+        const activeDrill = getActiveDrillCluster();
+        const isDrilled = Boolean(activeDrill && Array.isArray(activeDrill.subclusters) && activeDrill.subclusters.length);
+
         const q = document.getElementById("mapSearchBox").value.trim().toLowerCase();
-        const minW = parseFloat(document.getElementById("mapWeightSlider").value || "0");
-        document.getElementById("mapWeightVal").textContent = String(minW);
+        const minW = getMapMinWeight();
         const hasFilter = Boolean(q || minW > 0);
-        const showEraPath = document.getElementById("chkShowEraPath").checked;
+        const showEraPath = !isDrilled && document.getElementById("chkShowEraPath").checked;
         const showCentroids = document.getElementById("chkShowCentroids")?.checked !== false;
         const showClouds = document.getElementById("chkShowClouds")?.checked !== false;
 
         let matches = 0;
         const traces = [];
         const centroids = [];
+        const legendClusterIds = {};
         state.mapTraceIndex = [];
 
-        if (showClouds) {
-            (data.clusters || []).forEach((c, idx) => {
-                const color = CLUSTER_COLORS[idx % CLUSTER_COLORS.length];
-                const pts = (data.tracks || []).filter((t) => t.cluster_id === c.cluster_id);
-                if (pts.length < 4) return;
-                const rawCoords = pts.map((t) => ({
-                    x: state.is3d ? t.x3 : t.x,
-                    y: state.is3d ? t.y3 : t.y,
-                    z: t.z || 0,
-                }));
-                const trimmed = trimOutliers(rawCoords, 1.35);
-                if (trimmed.length < 4) return;
+        const displayGroups = isDrilled
+            ? activeDrill.subclusters.map((sc, idx) => ({
+                  id: sc.sub_cluster_id,
+                  prefix: "S",
+                  label: sc.vibe_label,
+                  share: sc.raw_percentage,
+                  color: CLUSTER_COLORS[idx % CLUSTER_COLORS.length],
+                  pts: (data.tracks || []).filter(
+                      (t) => Number(t.cluster_id) === Number(activeDrill.cluster_id) && Number(t.sub_cluster_id) === Number(sc.sub_cluster_id)
+                  ),
+              }))
+            : (data.clusters || []).map((c, idx) => ({
+                  id: c.cluster_id,
+                  prefix: "C",
+                  label: c.vibe_label,
+                  share: c.weighted_share_pct,
+                  color: CLUSTER_COLORS[idx % CLUSTER_COLORS.length],
+                  pts: (data.tracks || []).filter((t) => Number(t.cluster_id) === Number(c.cluster_id)),
+              }));
 
-                if (state.is3d) {
+        displayGroups.forEach((grp) => {
+            if (grp.pts.length < 4) return;
+            const rawCoords = grp.pts.map((t) => ({
+                x: state.is3d ? t.x3 : t.x,
+                y: state.is3d ? t.y3 : t.y,
+                z: t.z || 0,
+            }));
+            const trimmed = trimOutliers(rawCoords, 1.35);
+            if (trimmed.length < 4) return;
+
+            if (state.is3d) {
+                traces.push({
+                    type: "mesh3d",
+                    x: trimmed.map((p) => p.x),
+                    y: trimmed.map((p) => p.y),
+                    z: trimmed.map((p) => p.z),
+                    alphahull: 0,
+                    color: grp.color,
+                    opacity: 0.08,
+                    flatshading: true,
+                    lighting: { ambient: 0.9, diffuse: 0.3, specular: 0.0 },
+                    hoverinfo: "skip",
+                    showlegend: false,
+                    meta: { layer: "cluster-cloud" },
+                    visible: showClouds,
+                });
+            } else {
+                const hull = computeConvexHull2D(trimmed);
+                if (hull.length >= 4) {
                     traces.push({
-                        type: "mesh3d",
-                        x: trimmed.map((p) => p.x),
-                        y: trimmed.map((p) => p.y),
-                        z: trimmed.map((p) => p.z),
-                        alphahull: 0,
-                        color,
-                        opacity: 0.08,
-                        flatshading: true,
-                        lighting: { ambient: 0.9, diffuse: 0.3, specular: 0.0 },
+                        type: "scatter",
+                        mode: "lines",
+                        x: hull.map((p) => p.x),
+                        y: hull.map((p) => p.y),
+                        fill: "toself",
+                        fillcolor: hexToRgba(grp.color, 0.06),
+                        line: { color: hexToRgba(grp.color, 0.22), width: 1 },
                         hoverinfo: "skip",
                         showlegend: false,
+                        meta: { layer: "cluster-cloud" },
+                        visible: showClouds,
                     });
-                } else {
-                    const hull = computeConvexHull2D(trimmed);
-                    if (hull.length >= 4) {
-                        traces.push({
-                            type: "scatter",
-                            mode: "lines",
-                            x: hull.map((p) => p.x),
-                            y: hull.map((p) => p.y),
-                            fill: "toself",
-                            fillcolor: hexToRgba(color, 0.06),
-                            line: { color: hexToRgba(color, 0.20), width: 1 },
-                            hoverinfo: "skip",
-                            showlegend: false,
-                        });
-                    }
                 }
-            });
-        }
+            }
+        });
 
         const appendTrackGroupTrace = (pts, color, legendName, clusterLabel, options = {}) => {
-            const { collectCentroid = false, clusterId = -1, sizeScale = 1.0, fixedOp = null } = options;
+            const { collectCentroid = false, clusterId = -1, prefix = "C", sizeScale = 1.0, fixedOp = null } = options;
             const x = [];
             const y = [];
             const z = [];
@@ -1043,9 +1214,9 @@
 
                 const afLine = t.bpm != null ? `<br>Audio: ${t.bpm} BPM | Energy ${t.energy} | Valence ${t.valence}` : "";
                 texts.push(
-                    `<b>${escapeHtml(t.name)}</b> — ${escapeHtml(t.artist)}` +
-                    `<br>Cluster: ${escapeHtml(clusterLabel)}` +
-                    `<br>Genres: ${escapeHtml(t.genres || "None")}` +
+                    `<b>${plotlyText(t.name)}</b><br>${plotlyText(t.artist)}` +
+                    `<br>Cluster: ${plotlyText(clusterLabel)}` +
+                    `<br>Genres: ${plotlyText(t.genres || "None")}` +
                     afLine +
                     `<br>Weight: ${t.recency_weight}` +
                     (t.id ? "<br>Click to preview or open track" : "")
@@ -1058,7 +1229,7 @@
                     cy: y.reduce((acc, v) => acc + v, 0) / y.length,
                     cz: z.reduce((acc, v) => acc + v, 0) / z.length,
                     color,
-                    label: `C${clusterId} · ${clusterLabel}`,
+                    label: `${prefix}${clusterId} · ${clusterLabel}`,
                 });
             }
 
@@ -1082,19 +1253,20 @@
             traces.push(trace);
         };
 
-        (data.clusters || []).forEach((c, idx) => {
-            const color = CLUSTER_COLORS[idx % CLUSTER_COLORS.length];
-            const pts = (data.tracks || []).filter((t) => t.cluster_id === c.cluster_id);
+        displayGroups.forEach((grp) => {
+            if (!isDrilled) {
+                legendClusterIds[traces.length] = grp.id;
+            }
             appendTrackGroupTrace(
-                pts,
-                color,
-                `C${c.cluster_id}: ${c.vibe_label} (${c.weighted_share_pct}%)`,
-                c.vibe_label,
-                { collectCentroid: true, clusterId: c.cluster_id }
+                grp.pts,
+                grp.color,
+                `${grp.prefix}${grp.id}: ${grp.label} (${grp.share}%)`,
+                grp.label,
+                { collectCentroid: true, clusterId: grp.id, prefix: grp.prefix }
             );
         });
 
-        const unclusteredPts = (data.tracks || []).filter((t) => t.cluster_id === -1);
+        const unclusteredPts = isDrilled ? [] : (data.tracks || []).filter((t) => t.cluster_id === -1);
         if (unclusteredPts.length) {
             appendTrackGroupTrace(
                 unclusteredPts,
@@ -1176,9 +1348,27 @@
             }
             return `${projUpper} ${idx + 1}`;
         };
+        const uiRev = isDrilled ? `taste-map-drill-${activeDrill.cluster_id}` : "taste-map-v1";
+        let xRange = undefined;
+        let yRange = undefined;
+        if (isDrilled && !state.is3d) {
+            const drillPts = displayGroups.flatMap((g) => g.pts);
+            if (drillPts.length) {
+                const xs = drillPts.map((t) => t.x);
+                const ys = drillPts.map((t) => t.y);
+                const minX = Math.min(...xs);
+                const maxX = Math.max(...xs);
+                const minY = Math.min(...ys);
+                const maxY = Math.max(...ys);
+                const padX = Math.max(0.05, (maxX - minX) * 0.14);
+                const padY = Math.max(0.05, (maxY - minY) * 0.14);
+                xRange = [minX - padX, maxX + padX];
+                yRange = [minY - padY, maxY + padY];
+            }
+        }
         const layout = state.is3d
             ? {
-                  uirevision: "taste-map-v1",
+                  uirevision: uiRev,
                   paper_bgcolor: "#19191b",
                   font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
                   scene: {
@@ -1191,12 +1381,12 @@
                   legend: { orientation: "h", y: -0.05 },
               }
             : {
-                  uirevision: "taste-map-v1",
+                  uirevision: uiRev,
                   paper_bgcolor: "#19191b",
                   plot_bgcolor: "#141415",
                   font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
-                  xaxis: { title: axisLabel(0, ev2), gridcolor: "rgba(237,237,237,0.08)" },
-                  yaxis: { title: axisLabel(1, ev2), gridcolor: "rgba(237,237,237,0.08)" },
+                  xaxis: { title: axisLabel(0, ev2), gridcolor: "rgba(237,237,237,0.08)", ...(xRange ? { range: xRange } : {}) },
+                  yaxis: { title: axisLabel(1, ev2), gridcolor: "rgba(237,237,237,0.08)", ...(yRange ? { range: yRange } : {}) },
                   margin: { l: 50, r: 20, t: 20, b: 70 },
                   legend: { orientation: "h", y: -0.18 },
               };
@@ -1206,7 +1396,15 @@
         });
         if (typeof plotEl.removeAllListeners === "function") {
             plotEl.removeAllListeners("plotly_click");
+            plotEl.removeAllListeners("plotly_legendclick");
         }
+        plotEl.on("plotly_legendclick", (evt) => {
+            if (!isDrilled && evt && typeof evt.curveNumber === "number" && legendClusterIds[evt.curveNumber] !== undefined) {
+                enterClusterDrill(legendClusterIds[evt.curveNumber]);
+                return false;
+            }
+            return true;
+        });
         plotEl.on("plotly_click", (evt) => {
             const cd = evt?.points?.[0]?.customdata;
             if (!cd || typeof cd !== "object") return;
@@ -1262,20 +1460,41 @@
         );
     }
 
-    function renderClusterCards(clusters) {
+    function renderClusterCards(clusters, parentDrillCluster = null) {
         const grid = document.getElementById("clusterCardsGrid");
+        if (parentDrillCluster) {
+            grid.innerHTML = clusters
+                .map((sc) => {
+                    const t = sc.telemetry || {};
+                    const metrics = t.avg_bpm != null ? `${t.avg_bpm} BPM · E ${t.avg_energy} · V ${t.avg_valence}` : "No telemetry";
+                    const anchors = (sc.anchor_tracks || []).slice(0, 2).map((a) => `<li>${escapeHtml(a.name)} — ${escapeHtml(a.artist)}</li>`).join("");
+                    return `
+                    <div class="cluster-mini">
+                        <div class="cluster-mini-title">S${escapeHtml(sc.sub_cluster_id)}: ${escapeHtml(sc.vibe_label)}</div>
+                        <div class="cluster-mini-meta">${escapeHtml(sc.raw_percentage)}% of ${escapeHtml(parentDrillCluster.vibe_label)} · ${escapeHtml(sc.track_count)} tracks · ${escapeHtml(metrics)}</div>
+                        <ul class="cluster-mini-anchors">${anchors}</ul>
+                    </div>`;
+                })
+                .join("");
+            return;
+        }
         grid.innerHTML = clusters
             .map((c) => {
                 const t = c.telemetry || {};
                 const metrics = t.avg_bpm != null ? `${t.avg_bpm} BPM · E ${t.avg_energy} · V ${t.avg_valence}` : "No telemetry";
                 const anchors = (c.anchor_tracks || []).slice(0, 2).map((a) => `<li>${escapeHtml(a.name)} — ${escapeHtml(a.artist)}</li>`).join("");
+                const subCount = Array.isArray(c.subclusters) ? c.subclusters.length : 0;
+                const zoomBtn = subCount
+                    ? `<button class="btn btn-xs btn-primary drill-cluster-btn" data-cid="${escapeHtml(c.cluster_id)}" type="button">Zoom Sub-Vibes (${subCount})</button>`
+                    : "";
                 return `
                 <div class="cluster-mini">
-                    <div class="cluster-mini-title">C${escapeHtml(c.cluster_id)}: ${escapeHtml(c.vibe_label)}</div>
+                    <div class="cluster-mini-title ${subCount ? "clickable drill-cluster-btn" : ""}" data-cid="${escapeHtml(c.cluster_id)}">C${escapeHtml(c.cluster_id)}: ${escapeHtml(c.vibe_label)}</div>
                     <div class="cluster-mini-meta">${escapeHtml(c.weighted_share_pct)}% Share · ${escapeHtml(c.track_count)} tracks · ${escapeHtml(metrics)}</div>
                     <ul class="cluster-mini-anchors">${anchors}</ul>
                     <div class="btn-row">
-                        <button class="btn btn-xs btn-primary expand-cluster-btn" data-cid="${escapeHtml(c.cluster_id)}" type="button">Expand in Studio</button>
+                        ${zoomBtn}
+                        <button class="btn btn-xs expand-cluster-btn" data-cid="${escapeHtml(c.cluster_id)}" type="button">Studio</button>
                         <button class="btn btn-xs rename-cluster-btn" data-cid="${escapeHtml(c.cluster_id)}" data-label="${escapeHtml(c.vibe_label)}" type="button">Rename</button>
                     </div>
                 </div>`;
@@ -2749,7 +2968,7 @@
         document.getElementById("mapWeightSlider").addEventListener("input", scheduleMapFilter);
         document.getElementById("chkShowEraPath").addEventListener("change", renderTasteMapPlot);
         document.getElementById("chkShowCentroids").addEventListener("change", renderTasteMapPlot);
-        document.getElementById("chkShowClouds").addEventListener("change", renderTasteMapPlot);
+        document.getElementById("chkShowClouds").addEventListener("change", updateTasteMapClouds);
         document.getElementById("btnToggle3D").addEventListener("click", () => {
             state.is3d = !state.is3d;
             document.getElementById("btnToggle3D").textContent = state.is3d ? "Switch to 2D" : "Switch to 3D";
@@ -2760,7 +2979,20 @@
             document.getElementById("mapWeightSlider").value = "0";
             applyTasteMapFilter();
         });
+        document.getElementById("btnMapDrillBack")?.addEventListener("click", () => {
+            exitClusterDrill();
+        });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && state.drillClusterId !== null) {
+                exitClusterDrill();
+            }
+        });
         document.getElementById("clusterCardsGrid").addEventListener("click", (e) => {
+            const drillBtn = e.target.closest(".drill-cluster-btn");
+            if (drillBtn) {
+                enterClusterDrill(drillBtn.dataset.cid);
+                return;
+            }
             const renameBtn = e.target.closest(".rename-cluster-btn");
             if (renameBtn) {
                 const cid = renameBtn.dataset.cid;

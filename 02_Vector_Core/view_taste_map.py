@@ -3,6 +3,7 @@ import html
 import json
 import os
 import sys
+import textwrap
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
@@ -23,6 +24,10 @@ from utils import (
 
 def _safe_json_for_script(obj):
     return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
+
+
+def _plotly_text(value):
+    return "<br>".join(html.escape(line, quote=False) for line in textwrap.wrap(str(value), width=48))
 
 
 def _format_tooltip_telemetry(info):
@@ -105,10 +110,10 @@ def generate_html_visualizer(
             raw_genres = str(info.get("genres") or "None")
             raw_playlists = str(info.get("playlists") or "None")
 
-            name = html.escape(raw_name, quote=True)
-            artist = html.escape(raw_artist, quote=True)
-            genres = html.escape(raw_genres, quote=True)
-            playlists = html.escape(raw_playlists, quote=True)
+            name = _plotly_text(raw_name)
+            artist = _plotly_text(raw_artist)
+            genres = _plotly_text(raw_genres)
+            playlists = _plotly_text(raw_playlists)
             weight = float(info.get("recency_weight", 1.0))
             if weight > max_weight:
                 max_weight = weight
@@ -142,8 +147,8 @@ def generate_html_visualizer(
             )
 
             ht = (
-                f"<b>{name}</b> - {artist}"
-                f"<br>Vibe: {vibe_esc}"
+                f"<b>{name}</b><br>{artist}"
+                f"<br>Vibe: {_plotly_text(raw_vibe)}"
                 f"<br>Genres: {genres}"
                 f"<br>Playlists: {playlists}"
             )
@@ -228,8 +233,8 @@ def generate_html_visualizer(
     out_idx = [i for i, cl in enumerate(track_clusters) if cl == -1]
     if out_idx:
         out_texts = [
-            f"<b>{html.escape(str(metadata.get(str(track_ids[i]), {}).get('name', 'Unknown')), quote=True)}</b>"
-            f" - {html.escape(str(metadata.get(str(track_ids[i]), {}).get('artists', 'Unknown')), quote=True)}"
+            f"<b>{_plotly_text(metadata.get(str(track_ids[i]), {}).get('name', 'Unknown'))}</b>"
+            f"<br>{_plotly_text(metadata.get(str(track_ids[i]), {}).get('artists', 'Unknown'))}"
             f"<br>Vibe: Unclustered / Eclectic"
             for i in out_idx
         ]
@@ -264,7 +269,7 @@ def generate_html_visualizer(
         cx_vals = [float(pt[0]) for pt in center_coords]
         cy_vals = [float(pt[1]) for pt in center_coords]
         c_texts = [
-            f"<b>Cluster {c['cluster_id']} Center:</b> {html.escape(str(c.get('vibe_label', '')), quote=True)}"
+            f"<b>Cluster {c['cluster_id']} Center:</b> {_plotly_text(c.get('vibe_label', ''))}"
             for c in clusters
         ]
         traces_2d.append(
@@ -835,6 +840,7 @@ def main():
                 "top_genres": c.get("top_genres", []),
                 "anchor_tracks": c.get("anchor_tracks", [])[:5],
                 "telemetry": c.get("telemetry") or {},
+                "subclusters": c.get("subclusters") or [],
                 "center_2d": [round(float(center_coords[idx][0]), 5), round(float(center_coords[idx][1]), 5)],
                 "center_3d": [
                     round(float(center_coords_3d[idx][0]), 5),
@@ -862,11 +868,13 @@ def main():
                 "name": info.get("name", "Unknown"),
                 "artist": info.get("artists", "Unknown"),
                 "genres": info.get("genres", ""),
+                "macro_genre": info.get("macro_genre", ""),
                 "playlists": info.get("playlists", ""),
                 "year": info.get("year", ""),
                 "provider": prov,
                 "video_id": vid,
                 "cluster_id": int(track_clusters[idx]),
+                "sub_cluster_id": info.get("sub_cluster_id"),
                 "recency_weight": round(float(info.get("recency_weight", 1.0)), 3),
                 "skip_ratio": info.get("skip_ratio"),
                 "spotify_url": f"https://open.spotify.com/track/{sp_id}" if sp_id else None,

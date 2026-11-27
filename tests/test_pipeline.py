@@ -457,6 +457,16 @@ class TestLLMParserAndDiscoveryEngine(unittest.TestCase):
 
 
 class TestClustererAndVisualizer(unittest.TestCase):
+    def test_plotly_text_preserves_quotes_wraps_titles_and_escapes_markup(self):
+        title = 'KSI "Thick of It" PARODY I\'ve Got a Little Di.. ~ Rucka Rucka Ali'
+        formatted = view_taste_map._plotly_text(title)
+        self.assertIn('"Thick of It"', formatted)
+        self.assertIn("I've", formatted)
+        self.assertIn("<br>", formatted)
+        self.assertNotIn("&quot;", formatted)
+        self.assertNotIn("&#x27;", formatted)
+        self.assertEqual(view_taste_map._plotly_text('<script>alert("x")</script>'), '&lt;script&gt;alert("x")&lt;/script&gt;')
+
     def test_exact_artist_penalty_and_recency_weights(self):
         penalties = {"nf": 0.05}
         self.assertAlmostEqual(taste_clusterer.apply_artist_penalties("NF", 10.0, penalties), 0.5)

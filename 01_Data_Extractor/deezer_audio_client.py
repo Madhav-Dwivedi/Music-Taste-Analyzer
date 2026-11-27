@@ -18,6 +18,9 @@ if ROOT_DIR not in sys.path:
 from utils import atomic_write_json, get_track_fingerprint, load_json_safe
 
 DEEZER_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deezer_cache.json")
+DEEZER_ALBUM_GENRES_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "deezer_album_genres_cache.json"
+)
 DSP_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio_dsp_cache.json")
 
 _STRIP_PARENS_RE = re.compile(
@@ -279,6 +282,30 @@ def refresh_deezer_preview_url(deezer_id, session=None):
     return ""
 
 
+def fetch_deezer_album_genres(album_id, session=None, cache=None):
+    """Fetch and cache Deezer's editorial genre names for an album ID."""
+    if not album_id:
+        return []
+    key = str(album_id)
+    if cache is not None and key in cache:
+        cached = cache[key]
+        return list(cached) if isinstance(cached, list) else []
+
+    data = _polite_deezer_get(f"https://api.deezer.com/album/{key}", session=session)
+    genres = []
+    if isinstance(data, dict):
+        raw_list = ((data.get("genres") or {}).get("data")) or []
+        seen = set()
+        for item in raw_list:
+            name = str((item or {}).get("name") or "").strip()
+            if name and name.lower() != "all" and name.lower() not in seen:
+                seen.add(name.lower())
+                genres.append(name)
+    if cache is not None:
+        cache[key] = genres
+    return genres
+
+
 def decode_mp3_bytes(mp3_bytes, target_sr=48000):
     """Decode raw MP3/audio bytes in memory into a mono float32 waveform at target_sr."""
     if not mp3_bytes:
@@ -453,6 +480,15 @@ def load_deezer_cache():
 
 def save_deezer_cache(cache):
     atomic_write_json(DEEZER_CACHE_PATH, cache, indent=2)
+
+
+def load_deezer_album_genres_cache():
+    data = load_json_safe(DEEZER_ALBUM_GENRES_CACHE_PATH, default={})
+    return data if isinstance(data, dict) else {}
+
+
+def save_deezer_album_genres_cache(cache):
+    atomic_write_json(DEEZER_ALBUM_GENRES_CACHE_PATH, cache, indent=2)
 
 
 def load_dsp_cache():

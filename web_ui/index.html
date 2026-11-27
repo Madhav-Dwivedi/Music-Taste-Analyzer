@@ -452,9 +452,9 @@
                         <div class="map-toolbar">
                             <input id="mapSearchBox" type="text" placeholder="Search track, artist, or genre" />
                             <div class="inline-control">
-                                <span class="muted">Min weight</span>
-                                <input id="mapWeightSlider" type="range" min="0" max="50" value="0" />
-                                <span id="mapWeightVal" class="accent-text">0</span>
+                                <label for="mapWeightSlider" class="muted">Min weight</label>
+                                <input id="mapWeightSlider" type="range" min="0" max="1000" step="1" value="0" aria-valuetext="0 minimum weight" title="Fine control for low weights; drag right for higher weights." />
+                                <output id="mapWeightVal" for="mapWeightSlider" class="accent-text">0</output>
                             </div>
                             <label class="checkbox-row">
                                 <input type="checkbox" id="chkShowEraPath" checked />
@@ -478,6 +478,11 @@
                         </div>
                         <div id="mapOfflineBanner" class="warn-banner" style="display:none;">
                             Plotly failed to load offline. Cluster cards remain interactive below.
+                        </div>
+                        <div id="mapDrillBar" class="map-drill-bar" style="display:none;">
+                            <button class="btn btn-sm" id="btnMapDrillBack" type="button">← All Genres</button>
+                            <span id="mapDrillTitle" class="map-drill-title"></span>
+                            <span id="mapDrillMeta" class="muted"></span>
                         </div>
                         <div id="tasteMapPlot" class="plot-box"></div>
                     </div>
@@ -971,9 +976,11 @@
         </div>
         <div id="previewAudioWrap" class="preview-audio-wrap" style="display:none;">
             <div id="previewAudioMeta" class="preview-audio-meta"></div>
-            <audio id="previewAudio" controls preload="auto"></audio>
+            <audio id="previewAudio" controls preload="metadata"></audio>
         </div>
-        <iframe id="previewIframe" width="320" height="80" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
+        <iframe id="previewIframe" title="Track preview player" width="320" height="80" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allow="clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
+        <div id="previewYoutubeWrap" style="display:none;"></div>
+        <p id="previewEmbedNotice" class="preview-embed-notice" style="display:none;" role="status"></p>
     </div>
 
     <!-- CONFIRM MODAL -->

@@ -382,6 +382,50 @@ def _build_clap_text_doc(info):
     return ". ".join(parts)
 
 
+def inherit_artist_genres(track_ids, metadata, min_majority=0.60):
+    """For untagged tracks, inherit dominant macro_genre & top tags from same-artist tagged tracks."""
+    artist_macros = {}
+    artist_tags = {}
+    for tid in track_ids:
+        info = metadata.get(str(tid), {})
+        primary_artist = str(info.get("artists") or "").split(",")[0].strip().lower()
+        if not primary_artist or primary_artist in ("unknown", "various artists"):
+            continue
+        macro = str(info.get("macro_genre") or "").strip().lower()
+        genres_str = str(info.get("genres") or "").strip()
+        if not macro or not genres_str:
+            continue
+        artist_macros.setdefault(primary_artist, {})
+        artist_macros[primary_artist][macro] = artist_macros[primary_artist].get(macro, 0) + 1
+        artist_tags.setdefault(primary_artist, {})
+        for g in (x.strip().lower() for x in genres_str.split(",") if x.strip()):
+            artist_tags[primary_artist][g] = artist_tags[primary_artist].get(g, 0) + 1
+
+    inherited = 0
+    for tid in track_ids:
+        info = metadata.get(str(tid), {})
+        if (info.get("genres") or "").strip() and (info.get("macro_genre") or "").strip():
+            continue
+        primary_artist = str(info.get("artists") or "").split(",")[0].strip().lower()
+        if primary_artist not in artist_macros:
+            continue
+        m_counts = artist_macros[primary_artist]
+        total = sum(m_counts.values())
+        top_macro, top_cnt = max(m_counts.items(), key=lambda x: x[1])
+        if total >= 1 and (top_cnt / float(total)) >= float(min_majority):
+            info["macro_genre"] = top_macro
+            if not (info.get("genres") or "").strip():
+                top_g = [g for g, _ in sorted(artist_tags[primary_artist].items(), key=lambda x: -x[1])[:3]]
+                if top_macro not in top_g:
+                    top_g = [top_macro] + top_g[:2]
+                info["genres"] = ", ".join(top_g[:3])
+            inherited += 1
+
+    if inherited:
+        print(f"      🏷️ Inherited artist genres for {inherited} untagged/previewless tracks.")
+    return inherited
+
+
 def enrich_missing_genres_with_ollama(track_indices, track_ids, metadata, prefs=None, batch_size=20, timeout=30):
     """Tag tracks still missing genres using batched local Ollama inference."""
     import requests
@@ -526,15 +570,24 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import numpy as np
+    import requests
 
     stage1_dir = os.path.join(ROOT_DIR, "01_Data_Extractor")
     if stage1_dir not in sys.path:
         sys.path.insert(0, stage1_dir)
 
     import deezer_audio_client as dz
-    from clap_embedder import CLAP_DIM, embed_audio_waveform, embed_texts_clap, get_clap_model, tag_audio_embeddings
+    from clap_embedder import (
+        CLAP_DIM,
+        embed_audio_waveform,
+        embed_texts_clap,
+        get_clap_model,
+        map_tags_to_macro_genres,
+        tag_audio_embeddings,
+    )
 
     deezer_cache = dz.load_deezer_cache()
+    album_genres_cache = dz.load_deezer_album_genres_cache()
     dsp_cache = dz.load_dsp_cache()
     audio_cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clap_audio_cache.npz")
     raw_audio_cache = _load_clap_audio_cache(audio_cache_path)
@@ -640,18 +693,101 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
     if raw_audio_dirty:
         _save_clap_audio_cache(audio_cache_path, raw_audio_cache)
 
-    # Zero-shot tag tracks missing genres using CLAP audio vectors
+    # Tier 2: Enrich tracks missing native provider genres using Deezer editorial album genres (cached per album_id)
+    track_macro_hints = {}
+    album_ids_to_fetch = []
+    seen_aids = set()
+    for orig_idx in to_embed_indices:
+        tid = track_ids[orig_idx]
+        info = metadata[tid]
+        existing_g = (info.get("genres") or "").strip()
+        if existing_g:
+            macros = map_tags_to_macro_genres(existing_g)
+            if macros:
+                track_macro_hints[orig_idx] = macros
+                info["macro_genre"] = macros[0]
+            continue
+        fp = get_track_fingerprint(info.get("name", ""), info.get("artists", ""))
+        dz_entry = deezer_cache.get(fp) or {}
+        aid = dz_entry.get("album_id")
+        if aid:
+            aid_str = str(aid)
+            if aid_str not in album_genres_cache and aid_str not in seen_aids:
+                seen_aids.add(aid_str)
+                album_ids_to_fetch.append(aid_str)
+
+    if album_ids_to_fetch:
+        print(f"      🏷️ Fetching Deezer editorial album genres for {len(album_ids_to_fetch)} unique albums...")
+        sess_g = requests.Session()
+        for done_a, aid_str in enumerate(album_ids_to_fetch, 1):
+            dz.fetch_deezer_album_genres(aid_str, session=sess_g, cache=album_genres_cache)
+            if done_a % 100 == 0 or done_a == len(album_ids_to_fetch):
+                print(f"      ... fetched {done_a}/{len(album_ids_to_fetch)} album genres", flush=True)
+        dz.save_deezer_album_genres_cache(album_genres_cache)
+
+    # Apply Deezer editorial genres -> universal macro-genres
+    dz_genre_hits = 0
+    for orig_idx in to_embed_indices:
+        if orig_idx in track_macro_hints:
+            continue
+        tid = track_ids[orig_idx]
+        info = metadata[tid]
+        fp = get_track_fingerprint(info.get("name", ""), info.get("artists", ""))
+        aid = (deezer_cache.get(fp) or {}).get("album_id")
+        if not aid:
+            continue
+        dz_genres = album_genres_cache.get(str(aid)) or []
+        if dz_genres:
+            macros = map_tags_to_macro_genres(dz_genres)
+            if macros:
+                track_macro_hints[orig_idx] = macros
+                info["macro_genre"] = macros[0]
+                dz_genre_hits += 1
+            if not (info.get("genres") or "").strip():
+                info["genres"] = ", ".join(g.lower() for g in dz_genres[:3])
+    if dz_genre_hits:
+        print(f"      🏷️ Mapped {dz_genre_hits} tracks to global macro-genres via Deezer editorial metadata.")
+
+    # Tier 4: Zero-shot CLAP subgenre tagging (scoped to known macro-genre when available)
     if audio_indices:
-        need_tag_idx = [i for i in audio_indices if not (metadata[track_ids[i]].get("genres") or "").strip()]
+        # Only tag tracks missing genres OR having only broad macro tags (< 3 tags)
+        need_tag_idx = [
+            i
+            for i in audio_indices
+            if len([t for t in str(metadata[track_ids[i]].get("genres") or "").split(",") if t.strip()]) < 3
+        ]
         if need_tag_idx:
             mat = np.vstack([audio_vectors[i] for i in need_tag_idx])
-            tag_lists = tag_audio_embeddings(mat, processor, model, device=device, top_k=3)
+            hints_list = [track_macro_hints.get(i) for i in need_tag_idx]
+            tag_lists = tag_audio_embeddings(
+                mat, processor, model, device=device, top_k=3, macro_hints=hints_list
+            )
             for idx_pos, orig_idx in enumerate(need_tag_idx):
-                metadata[track_ids[orig_idx]]["genres"] = ", ".join(tag_lists[idx_pos])
+                info = metadata[track_ids[orig_idx]]
+                promoted_macro = tag_lists[idx_pos][0] if tag_lists[idx_pos] else ""
+                if promoted_macro:
+                    info["macro_genre"] = promoted_macro
+                existing = [t.strip().lower() for t in str(info.get("genres") or "").split(",") if t.strip()]
+                merged = list(existing)
+                for tag in tag_lists[idx_pos]:
+                    if tag.lower() not in merged:
+                        merged.append(tag.lower())
+                    if len(merged) >= 3:
+                        break
+                info["genres"] = ", ".join(merged)
 
-    # Enrich genres for previewless tracks via local Ollama before CLAP text encoding
+    # Inherit dominant genres from same-artist tagged tracks before Ollama fallback
+    inherit_artist_genres(track_ids, metadata)
+
+    # Tier 3: Enrich genres for previewless tracks via local Ollama before CLAP text encoding
     if text_fallback_indices:
         enrich_missing_genres_with_ollama(text_fallback_indices, track_ids, metadata)
+        for orig_idx in text_fallback_indices:
+            info = metadata[track_ids[orig_idx]]
+            if not info.get("macro_genre") and (info.get("genres") or "").strip():
+                macros = map_tags_to_macro_genres(info["genres"])
+                if macros:
+                    info["macro_genre"] = macros[0]
 
     # Encode clean genre-first metadata for ALL tracks, then Ridge-align text onto the audio manifold
     ordered_indices = audio_indices + text_fallback_indices
