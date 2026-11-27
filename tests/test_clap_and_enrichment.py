@@ -233,6 +233,46 @@ class TestClapAndEnrichment(unittest.TestCase):
         counts = np.bincount(labels)
         self.assertLessEqual(counts.max() / float(len(embs)), 0.30)
 
+    def test_align_text_to_audio_manifold_projects_rotated_space(self):
+        rng = np.random.RandomState(19)
+        n = 60
+        dim = 32
+        audio = rng.normal(0.0, 1.0, size=(n, dim)).astype(np.float32)
+        audio /= np.linalg.norm(audio, axis=1, keepdims=True)
+        # Apply fixed orthogonal rotation + small noise to simulate CLAP text subspace offset
+        q_mat, _ = np.linalg.qr(rng.normal(0.0, 1.0, size=(dim, dim)))
+        text_audio = (audio @ q_mat.T + rng.normal(0.0, 0.05, size=(n, dim))).astype(np.float32)
+        text_audio /= np.linalg.norm(text_audio, axis=1, keepdims=True)
+
+        aligned = npu_vectorizer.align_text_to_audio_manifold(audio, text_audio, text_audio, alpha=1.0)
+        before_cos = float(np.mean(np.sum(audio * text_audio, axis=1)))
+        after_cos = float(np.mean(np.sum(audio * aligned, axis=1)))
+        self.assertGreater(after_cos, before_cos + 0.35)
+        np.testing.assert_allclose(np.linalg.norm(aligned, axis=1), np.ones(n), atol=1e-5)
+
+    def test_fit_hdbscan_clusters_separates_modes_and_marks_outliers(self):
+        rng = np.random.RandomState(23)
+        dim = 32
+        pts = []
+        # 3 tight dense modes (25 each) + 8 isolated scatter outliers
+        for k in range(3):
+            center = np.eye(5, dim, dtype=float)[k]
+            blk = center + rng.normal(0.0, 0.03, size=(25, dim))
+            blk /= np.linalg.norm(blk, axis=1, keepdims=True)
+            pts.append(blk)
+        outliers = rng.normal(0.0, 1.0, size=(8, dim))
+        outliers /= np.linalg.norm(outliers, axis=1, keepdims=True)
+        pts.append(outliers)
+
+        embs = np.vstack(pts)
+        weights = np.ones(len(embs), dtype=float)
+        labels, centers, probs, _ = taste_clusterer.fit_hdbscan_clusters(
+            embs, weights, umap_dims=6, min_cluster_ratio=0.10, max_cluster_share=0.50
+        )
+        self.assertGreaterEqual(len(centers), 2)
+        self.assertEqual(probs.shape, (len(embs), len(centers)))
+        self.assertTrue(np.any(labels == -1))
+
 
 if __name__ == "__main__":
     unittest.main()

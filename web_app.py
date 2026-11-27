@@ -53,6 +53,7 @@ from utils import (
     get_effective_preferences,
     get_openvino_devices,
     get_spotify_client_id,
+    get_track_fingerprint,
     is_valid_spotify_id,
     is_valid_ytm_id,
     is_valid_ytm_video_id,
@@ -395,70 +396,51 @@ class JobManager:
         env["PYTHONIOENCODING"] = "utf-8"
 
         final_code = 0
-        with open(log_path, "w", encoding="utf-8") as log_fh:
-            for idx, (argv, cwd, label) in enumerate(steps, start=1):
-                with self._lock:
-                    if self._cancel_requested:
-                        final_code = 130
-                        break
-                    self.state["step_index"] = idx
-                    self.state["label"] = f"{label} ({idx}/{len(steps)})"
-                    cur_state = dict(self.state)
-                self._broadcast("state", cur_state)
-                self._append_log(f"--- Starting {label} ({idx}/{len(steps)}) ---", log_fh)
-
-                proc = subprocess.Popen(
-                    argv,
-                    shell=False,
-                    cwd=cwd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                )
-                with self._lock:
-                    self._proc = proc
-
-                q = Queue()
-                reader = threading.Thread(target=enqueue_output, args=(proc.stdout, q), daemon=True)
-                reader.start()
-
-                buf = ""
-                while True:
-                    try:
-                        chunk = q.get(timeout=0.05)
-                        for ch in chunk:
-                            if ch == "\r":
-                                continue
-                            if ch == "\n":
-                                self._append_log(buf, log_fh)
-                                buf = ""
-                            else:
-                                buf += ch
-                    except Empty:
-                        if proc.poll() is not None and not reader.is_alive() and q.empty():
+        try:
+            with open(log_path, "w", encoding="utf-8") as log_fh:
+                for idx, (argv, cwd, label) in enumerate(steps, start=1):
+                    with self._lock:
+                        if self._cancel_requested:
                             break
+                        self.state["step_index"] = idx
+                        self.state["label"] = f"{label} ({idx}/{len(steps)})"
+                        cur_state = dict(self.state)
+                    self._broadcast("state", cur_state)
+                    self._append_log(f"--- Starting {label} ({idx}/{len(steps)}) ---", log_fh)
 
-                reader.join(timeout=1.0)
-                while not q.empty():
-                    chunk = q.get_nowait()
-                    for ch in chunk:
-                        if ch == "\r":
-                            continue
-                        if ch == "\n":
-                            self._append_log(buf, log_fh)
-                            buf = ""
-                        else:
-                            buf += ch
-                if buf:
-                    self._append_log(buf, log_fh)
+                    with self._lock:
+                        if self._cancel_requested:
+                            break
+                        proc = subprocess.Popen(
+                            argv,
+                            shell=False,
+                            cwd=cwd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            env=env,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                        self._proc = proc
 
-                ret = proc.returncode
-                with self._lock:
-                    self._proc = None
-                if ret != 0:
-                    final_code = ret
-                    break
-
+                    try:
+                        with proc.stdout:
+                            for line in proc.stdout:
+                                self._append_log(line.rstrip("\r\n"), log_fh)
+                        final_code = proc.wait()
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill()
+                            proc.wait()
+                        with self._lock:
+                            self._proc = None
+                    if final_code != 0:
+                        break
+        except Exception as exc:
+            final_code = 1
+            self._append_log(f"❌ Could not run job: {exc}")
+        finally:
             with self._lock:
                 cancelled = self._cancel_requested
                 self.state["exit_code"] = 130 if cancelled else final_code
@@ -1082,6 +1064,52 @@ def make_handler(app_ctx):
                     if not isinstance(data, dict):
                         return self._send_json(HTTPStatus.OK, {"available": False})
                     return self._send_json(HTTPStatus.OK, {"available": True, **data})
+
+                if path == "/api/preview-audio":
+                    import deezer_audio_client as dz
+
+                    title = (qs.get("title") or [""])[0].strip()
+                    artist = (qs.get("artist") or [""])[0].strip()
+                    if not title:
+                        return self._send_json(HTTPStatus.OK, {"found": False})
+
+                    fp = get_track_fingerprint(title, artist)
+                    dz_cache = dz.load_deezer_cache()
+                    entry = dz_cache.get(fp)
+                    dirty = False
+                    if not isinstance(entry, dict) or (not entry.get("found") and entry.get("v") != 2):
+                        entry = dz.search_deezer_track(title, artist, cache=None)
+                        dz_cache[fp] = entry
+                        dirty = True
+
+                    if not entry.get("found"):
+                        if dirty:
+                            dz.save_deezer_cache(dz_cache)
+                        return self._send_json(HTTPStatus.OK, {"found": False})
+
+                    preview_url = entry.get("preview_url") or ""
+                    exp_match = re.search(r"exp=(\d+)", preview_url)
+                    is_expired = bool(exp_match and int(exp_match.group(1)) <= int(time.time()) + 60)
+                    if not preview_url or is_expired:
+                        fresh = dz.refresh_deezer_preview_url(entry.get("deezer_id"))
+                        if fresh:
+                            preview_url = fresh
+                            dz_cache[fp] = dict(entry, preview_url=fresh)
+                            dirty = True
+
+                    if dirty:
+                        dz.save_deezer_cache(dz_cache)
+
+                    return self._send_json(
+                        HTTPStatus.OK,
+                        {
+                            "found": bool(preview_url),
+                            "preview_url": preview_url,
+                            "title": entry.get("title") or title,
+                            "artist": entry.get("artist") or artist,
+                            "album": entry.get("album") or "",
+                        },
+                    )
 
                 if path == "/api/playlists":
                     last_pl = load_json_safe(LAST_PL_PATH)

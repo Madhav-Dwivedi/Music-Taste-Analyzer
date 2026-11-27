@@ -29,7 +29,7 @@
   * **Taste Blend ("Match With a Friend")**: Export a non-PII `music_taste_card.json` share card, compute **Taste Compatibility %**, and generate blended playlists.
   * **Live Curation**: Conversational refinement bar (`"more upbeat"`, `"remove Drake"`), drag-and-drop track reordering, inline title/description editing, 👍/👎 feedback memory (with optional Liked Songs sync), and updating **existing playlists** in place.
 * **🚫 Session Taste Guardrails**: Exclude specific **artists** or **genres** for your session across Stage 2 clustering and Stage 3 discovery, or save persistent defaults & cluster labels in `user_preferences.json`.
-* **⚡ Incremental Vectorization & NPU/CPU Acceleration**: Hash-based embedding cache reuses unchanged track vectors so Stage 2 refreshes finish in seconds.
+* **⚡ Incremental Vectorization & NPU/CPU Acceleration**: Caches track vectors before playlist blending so unchanged refreshes stay stable. MiniLM re-embeds changed tracks; CLAP rebuilds library-wide alignment when tracks or embedding settings change, reusing cached audio embeddings.
 * **🎛️ DJ Flow & Harmonic Sequencing**: Order playlists via *Warm-Up → Peak → Cooldown*, *Energy Ramp*, *Chill Descent*, *Camelot Wheel Harmonic Mixing*, *Artist-Spaced Shuffle*, or *MMR Relevance*.
 * **🌌 Interactive 2D / 3D Taste Map, UMAP & Era Evolution**: Choose **PCA** or optional **UMAP** projection, filter by **Era years** (`--era-start`/`--era-end`), overlay your **2020 → 2026 Taste Evolution Path**, rename clusters, and click tracks to preview or expand.
 * **🧹 Extended History Drag-and-Drop & Library Hygiene**: Upload Spotify `.zip`/`.json` or Google Takeout `.zip`/`watch-history.json` archives safely in-browser, inspect listening telemetry, resurrect Forgotten Favorites, and audit playlists for duplicates, chronically skipped songs, or disliked tracks (with one-click Spotify playlist deduplication).
@@ -170,8 +170,10 @@ Spotify Development Mode apps require an active host Spotify Premium account and
 Run the unit & integration test suite (all network/model calls are cleanly mocked):
 
 ```bash
-python -m unittest discover -s tests -v
+python -X utf8 -m unittest discover -s tests -v
 ```
+
+UTF-8 mode keeps emoji log output working on Windows. Older vector caches are rebuilt once on the next Stage 2 refresh to store vectors before playlist blending.
 
 ---
 

@@ -483,6 +483,127 @@ def fit_gmm_clusters(embeddings, weights, min_k=3, max_k=14, fixed_k=None, pca_d
     return labels, np.vstack(final_centers), probs, bic_scores
 
 
+def fit_hdbscan_clusters(embeddings, weights, umap_dims=10, min_cluster_ratio=0.018, max_cluster_share=0.22):
+    """Density-based clustering in cosine-UMAP manifold via HDBSCAN, allowing -1 unclustered outliers."""
+    import numpy as np
+    from sklearn.cluster import HDBSCAN
+    from sklearn.mixture import GaussianMixture
+
+    mat = np.asarray(embeddings, dtype=float)
+    n_samples = len(mat)
+    w_arr = np.asarray(weights, dtype=float)
+    if len(w_arr) != n_samples or float(w_arr.sum()) <= 0.0:
+        w_arr = np.ones(n_samples, dtype=float)
+
+    if n_samples < 30:
+        return fit_gmm_clusters(mat, w_arr, min_k=2, max_k=min(6, max(2, n_samples - 1)), max_cluster_share=max_cluster_share)
+
+    mat_centered = mat - np.mean(mat, axis=0, keepdims=True)
+    c_norms = np.linalg.norm(mat_centered, axis=1, keepdims=True)
+    c_norms = np.where(c_norms > 1e-9, c_norms, 1.0)
+    mat_centered = mat_centered / c_norms
+
+    raw_min = int(float(min_cluster_ratio) * n_samples)
+    min_c_size = max(12, raw_min) if n_samples >= 120 else max(5, min(12, n_samples // 6))
+    min_samples = max(4, min_c_size // 3)
+
+    n_comp = max(2, min(int(umap_dims), n_samples - 2, mat.shape[1]))
+    try:
+        import umap
+
+        reducer = umap.UMAP(
+            n_components=n_comp,
+            n_neighbors=min(15, max(5, min_c_size)),
+            min_dist=0.0,
+            metric="cosine",
+            random_state=42,
+        )
+        x_embed = reducer.fit_transform(mat_centered)
+    except Exception:
+        x_embed = _reduce_for_clustering(mat, max_dims=n_comp)
+
+    hdb = HDBSCAN(
+        min_cluster_size=min_c_size,
+        min_samples=min_samples,
+        metric="euclidean",
+        cluster_selection_method="leaf",
+        copy=True,
+    )
+    hdb.fit(x_embed)
+    raw_labels = hdb.labels_.astype(int)
+    raw_probs = getattr(hdb, "probabilities_", np.where(raw_labels >= 0, 1.0, 0.0))
+
+    found_ids = sorted(c for c in set(raw_labels.tolist()) if c >= 0)
+    if len(found_ids) < 2:
+        return fit_gmm_clusters(mat, w_arr, min_k=3, max_k=14, max_cluster_share=max_cluster_share)
+
+    # Split any oversized dense continent cleanly while preserving density outliers (-1)
+    if n_samples >= 80 and float(max_cluster_share or 0.0) > 0.0:
+        min_half = max(4, min_c_size // 2)
+        for _ in range(2):
+            cur_ids = sorted(c for c in set(raw_labels.tolist()) if c >= 0)
+            share_limit = max(float(max_cluster_share), 1.6 / max(1, len(cur_ids)))
+            biggest = max(cur_ids, key=lambda cid: int(np.sum(raw_labels == cid)))
+            big_mask = raw_labels == biggest
+            if (int(np.sum(big_mask)) / float(n_samples)) <= share_limit or len(cur_ids) >= 18:
+                break
+            sub_x = x_embed[big_mask]
+            if len(sub_x) < max(2 * min_half, 8):
+                break
+            sub_gmm = GaussianMixture(
+                n_components=2, covariance_type="diag", reg_covar=1e-4, n_init=5, random_state=42
+            ).fit(sub_x)
+            sub_lbls = np.argmax(sub_gmm.predict_proba(sub_x), axis=1)
+            if int(np.sum(sub_lbls == 0)) < min_half or int(np.sum(sub_lbls == 1)) < min_half:
+                break
+            new_cid = max(cur_ids) + 1
+            raw_labels[big_mask] = np.where(sub_lbls == 0, biggest, new_cid)
+
+    final_ids = sorted(c for c in set(raw_labels.tolist()) if c >= 0)
+    id_map = {old_cid: new_idx for new_idx, old_cid in enumerate(final_ids)}
+    labels = np.array([id_map[c] if c >= 0 else -1 for c in raw_labels], dtype=int)
+    n_out = len(final_ids)
+
+    # Reject orthogonal border tracks dragged into clusters by UMAP k-NN edges
+    c_centers = []
+    for cid in range(n_out):
+        mask = labels == cid
+        cw = w_arr[mask]
+        cv = np.average(mat_centered[mask], axis=0, weights=cw) if float(cw.sum()) > 1e-9 else np.mean(mat_centered[mask], axis=0)
+        cn = float(np.linalg.norm(cv))
+        c_centers.append(cv / cn if cn > 0 else cv)
+    c_centers_mat = np.vstack(c_centers)
+
+    for i in range(n_samples):
+        if labels[i] >= 0 and float(np.dot(mat_centered[i], c_centers_mat[labels[i]])) < 0.20:
+            labels[i] = -1
+
+    kept_cids = sorted(c for c in set(labels.tolist()) if c >= 0 and int(np.sum(labels == c)) > 0)
+    if len(kept_cids) < 2:
+        return fit_gmm_clusters(mat, w_arr, min_k=3, max_k=14, max_cluster_share=max_cluster_share)
+
+    re_map = {old_c: new_c for new_c, old_c in enumerate(kept_cids)}
+    labels = np.array([re_map[c] if c in re_map else -1 for c in labels], dtype=int)
+    n_out = len(kept_cids)
+
+    centers = []
+    probs = np.zeros((n_samples, n_out), dtype=float)
+    for new_cid in range(n_out):
+        mask = labels == new_cid
+        cw = w_arr[mask]
+        c_vec = np.average(mat[mask], axis=0, weights=cw) if float(cw.sum()) > 1e-9 else np.mean(mat[mask], axis=0)
+        c_norm = float(np.linalg.norm(c_vec))
+        if c_norm > 0:
+            c_vec = c_vec / c_norm
+        centers.append(c_vec)
+
+    for i in range(n_samples):
+        if labels[i] >= 0:
+            probs[i, labels[i]] = float(raw_probs[i]) if i < len(raw_probs) else 1.0
+
+    return labels, np.vstack(centers), probs, {}
+
+
 def build_vibe_label(cluster_id, top_genre_names, anchor_tracks, cluster_size, used_labels, used_artists):
     """Construct a human-readable, guaranteed-unique vibe title for a cluster."""
     artist_counts = {}
@@ -784,9 +905,9 @@ def main():
     )
     parser.add_argument(
         "--method",
-        choices=["auto", "gmm", "kmeans"],
+        choices=["auto", "hdbscan", "gmm", "kmeans"],
         default="auto",
-        help="Clustering algorithm: gmm (PCA+GMM+BIC) or kmeans (default: auto)",
+        help="Clustering algorithm: hdbscan (UMAP+HDBSCAN with outliers), gmm (PCA+GMM+BIC), or kmeans (default: auto)",
     )
     parser.add_argument("--k", type=int, default=None, help="Optional fixed number of clusters")
     parser.add_argument("--no-llm-names", action="store_true", help="Skip batched Ollama cluster naming")
@@ -900,15 +1021,31 @@ def main():
     )
 
     cluster_method = (
-        getattr(config, "DEFAULT_CLUSTER_METHOD", "gmm") if args.method == "auto" else args.method
+        getattr(config, "DEFAULT_CLUSTER_METHOD", "hdbscan") if args.method == "auto" else args.method
     )
+    if args.k is not None and cluster_method == "hdbscan":
+        cluster_method = "gmm"
     min_k = int(getattr(config, "MIN_CLUSTERS", 3))
     max_k = int(getattr(config, "MAX_CLUSTERS", 14))
     max_cluster_share = float(getattr(config, "MAX_CLUSTER_SHARE", 0.22))
     pca_dims = int(getattr(config, "GMM_PCA_DIMS", 20))
 
     probs = None
-    if cluster_method == "gmm":
+    if cluster_method == "hdbscan":
+        umap_dims = int(getattr(config, "HDBSCAN_UMAP_DIMS", 10))
+        min_ratio = float(getattr(config, "HDBSCAN_MIN_CLUSTER_RATIO", 0.018))
+        print(f"\n[3/3] Analyzing Taste Sub-Clusters (UMAP-{umap_dims} + HDBSCAN Density)...")
+        labels, cluster_centers, probs, bic_scores = fit_hdbscan_clusters(
+            kept_embeddings,
+            weights,
+            umap_dims=umap_dims,
+            min_cluster_ratio=min_ratio,
+            max_cluster_share=max_cluster_share,
+        )
+        n_clusters = len(cluster_centers)
+        noise_cnt = int(np.sum(labels < 0))
+        print(f"      -> Discovered {n_clusters} dense clusters ({noise_cnt} unclustered / eclectic outlier tracks)")
+    elif cluster_method == "gmm":
         print(f"\n[3/3] Analyzing Taste Sub-Clusters (Centered PCA-{pca_dims} + GMM + BIC)...")
         labels, cluster_centers, probs, bic_scores = fit_gmm_clusters(
             kept_embeddings,
@@ -1045,9 +1182,10 @@ def main():
 
     for kept_pos, tid in enumerate(kept_track_ids):
         metadata[tid]["recency_weight"] = float(weights[kept_pos])
-        metadata[tid]["cluster_id"] = int(raw_to_seq_id.get(int(labels[kept_pos]), 0))
+        raw_cid = int(labels[kept_pos])
+        metadata[tid]["cluster_id"] = -1 if raw_cid < 0 else int(raw_to_seq_id.get(raw_cid, -1))
         metadata[tid]["excluded_from_taste"] = False
-        if probs is not None:
+        if probs is not None and raw_cid >= 0:
             row_p = probs[kept_pos]
             top2_idx = np.argsort(row_p)[::-1][:2]
             metadata[tid]["cluster_probs"] = [
@@ -1079,6 +1217,7 @@ def main():
         "cluster_method": cluster_method,
         "master_taste_centroid": master_centroid.tolist(),
         "clusters": clusters_out,
+        "unclustered_track_count": int(np.sum(labels < 0)),
         "yearly_centroids": yearly_centroids,
         "session_filters": {
             "active_provider": eff_provider,

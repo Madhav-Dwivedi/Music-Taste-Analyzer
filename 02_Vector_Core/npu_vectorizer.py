@@ -4,7 +4,6 @@ import json
 import os
 import re
 import sys
-import time
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
@@ -12,6 +11,7 @@ if ROOT_DIR not in sys.path:
 
 import config
 from utils import (
+    atomic_output_file,
     atomic_write_json,
     configure_utf8_stdio,
     extract_ytm_video_id,
@@ -474,6 +474,53 @@ def _center_and_normalize(mat):
     return (arr / norms).astype(np.float32)
 
 
+def align_text_to_audio_manifold(audio_centered, text_centered_audio, text_centered_all, alpha=15.0):
+    """Project CLAP text embeddings onto the centered CLAP audio manifold via paired Ridge regression."""
+    import numpy as np
+
+    all_t = np.asarray(text_centered_all, dtype=np.float32)
+    if len(audio_centered) < 20 or len(audio_centered) != len(text_centered_audio) or len(all_t) == 0:
+        return all_t
+
+    from sklearn.linear_model import Ridge
+
+    reg = Ridge(alpha=float(alpha), fit_intercept=False)
+    reg.fit(np.asarray(text_centered_audio, dtype=np.float32), np.asarray(audio_centered, dtype=np.float32))
+    proj = reg.predict(all_t).astype(np.float32)
+    norms = np.linalg.norm(proj, axis=1, keepdims=True)
+    norms = np.where(norms > 1e-8, norms, 1.0)
+    return (proj / norms).astype(np.float32)
+
+
+def _load_clap_audio_cache(cache_path):
+    import numpy as np
+
+    out = {}
+    if not os.path.exists(cache_path):
+        return out
+    try:
+        with np.load(cache_path, allow_pickle=False) as d:
+            fps = d["fingerprints"]
+            vecs = d["vectors"]
+            if len(fps) == len(vecs):
+                for fp, vec in zip(fps, vecs):
+                    out[str(fp)] = np.asarray(vec, dtype=np.float32)
+    except Exception:
+        return {}
+    return out
+
+
+def _save_clap_audio_cache(cache_path, cache_dict):
+    import numpy as np
+
+    if not cache_dict:
+        return
+    fps = np.array(list(cache_dict.keys()))
+    vecs = np.vstack([np.asarray(cache_dict[k], dtype=np.float32) for k in cache_dict]).astype(np.float32)
+    with atomic_output_file(cache_path, binary=True) as f:
+        np.savez(f, fingerprints=fps, vectors=vecs)
+
+
 def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
     """Enrich missing audio/DSP telemetry from Deezer 30s previews and embed via CLAP."""
     import threading
@@ -489,6 +536,9 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
 
     deezer_cache = dz.load_deezer_cache()
     dsp_cache = dz.load_dsp_cache()
+    audio_cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clap_audio_cache.npz")
+    raw_audio_cache = _load_clap_audio_cache(audio_cache_path)
+    raw_audio_dirty = False
     cache_lock = threading.Lock()
 
     processor, model, device = get_clap_model()
@@ -507,6 +557,12 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
 
         with cache_lock:
             cached_dz = deezer_cache.get(fp)
+            cached_dsp = dsp_cache.get(fp)
+            cached_raw = raw_audio_cache.get(fp)
+
+        if cached_raw is not None and len(cached_raw) == CLAP_DIM:
+            return orig_idx, cached_dz or {}, None, cached_dsp if is_real_audio_features(cached_dsp) else None, cached_raw, fp
+
         if cached_dz is None or (isinstance(cached_dz, dict) and not cached_dz.get("found") and cached_dz.get("v") != 2):
             cached_dz = dz.search_deezer_track(name, artist, cache=None)
             with cache_lock:
@@ -525,8 +581,6 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
                     deezer_cache[fp] = cached_dz
 
         dsp_af = None
-        with cache_lock:
-            cached_dsp = dsp_cache.get(fp)
         if is_real_audio_features(cached_dsp):
             dsp_af = cached_dsp
         elif wav is not None:
@@ -537,7 +591,7 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
             except Exception:
                 dsp_af = None
 
-        return orig_idx, cached_dz, wav, dsp_af
+        return orig_idx, cached_dz, wav, dsp_af, None, fp
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(_fetch_track_audio, orig_idx) for orig_idx in to_embed_indices]
@@ -545,7 +599,7 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
         total_cnt = len(to_embed_indices)
         for fut in as_completed(futures):
             done_cnt += 1
-            orig_idx, dz_info, wav, dsp_af = fut.result()
+            orig_idx, dz_info, wav, dsp_af, cached_raw, fp = fut.result()
             tid = track_ids[orig_idx]
             info = metadata[tid]
 
@@ -557,12 +611,18 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
             if not is_real_audio_features(info.get("audio_features")) and is_real_audio_features(dsp_af):
                 info["audio_features"] = dsp_af
 
-            if wav is not None:
+            if cached_raw is not None:
+                audio_vectors[orig_idx] = cached_raw
+                audio_indices.append(orig_idx)
+                info["embed_source"] = "clap_audio"
+            elif wav is not None:
                 try:
                     vec = embed_audio_waveform(wav, processor, model, device=device, max_windows=3, sr=48000)
                     audio_vectors[orig_idx] = vec
                     audio_indices.append(orig_idx)
                     info["embed_source"] = "clap_audio"
+                    raw_audio_cache[fp] = vec
+                    raw_audio_dirty = True
                 except Exception:
                     text_fallback_indices.append(orig_idx)
             else:
@@ -577,6 +637,8 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
 
     dz.save_deezer_cache(deezer_cache)
     dz.save_dsp_cache(dsp_cache)
+    if raw_audio_dirty:
+        _save_clap_audio_cache(audio_cache_path, raw_audio_cache)
 
     # Zero-shot tag tracks missing genres using CLAP audio vectors
     if audio_indices:
@@ -591,7 +653,7 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
     if text_fallback_indices:
         enrich_missing_genres_with_ollama(text_fallback_indices, track_ids, metadata)
 
-    # Encode clean genre-first metadata for ALL tracks so audio embeddings gain style/era grounding
+    # Encode clean genre-first metadata for ALL tracks, then Ridge-align text onto the audio manifold
     ordered_indices = audio_indices + text_fallback_indices
     result_vecs = {}
     if ordered_indices:
@@ -601,24 +663,31 @@ def _enrich_and_embed_clap(to_embed_indices, docs, track_ids, metadata):
         pos_by_idx = {orig_idx: pos for pos, orig_idx in enumerate(ordered_indices)}
 
         w_text = float(getattr(config, "CLAP_TEXT_BLEND_WEIGHT", 0.28))
+        ridge_alpha = float(getattr(config, "CLAP_RIDGE_ALPHA", 15.0))
         if audio_indices:
             audio_mat = np.vstack([audio_vectors[i] for i in audio_indices])
             audio_centered = _center_and_normalize(audio_mat)
+            text_centered_audio = np.vstack([text_centered[pos_by_idx[i]] for i in audio_indices])
+            text_aligned = align_text_to_audio_manifold(
+                audio_centered, text_centered_audio, text_centered, alpha=ridge_alpha
+            )
             for pos_a, orig_idx in enumerate(audio_indices):
-                t_vec = text_centered[pos_by_idx[orig_idx]]
+                t_vec = text_aligned[pos_by_idx[orig_idx]]
                 blended = ((1.0 - w_text) * audio_centered[pos_a]) + (w_text * t_vec)
                 b_norm = float(np.linalg.norm(blended))
                 if b_norm > 1e-8:
                     blended = blended / b_norm
                 result_vecs[orig_idx] = blended.astype(np.float32)
+        else:
+            text_aligned = text_centered
 
         for orig_idx in text_fallback_indices:
-            result_vecs[orig_idx] = text_centered[pos_by_idx[orig_idx]].astype(np.float32)
+            result_vecs[orig_idx] = text_aligned[pos_by_idx[orig_idx]].astype(np.float32)
             metadata[track_ids[orig_idx]]["embed_source"] = "clap_text"
 
         print(
-            f"      🧬 Mean-centered & blended {len(audio_indices)} audio tracks "
-            f"(text weight={w_text:.2f}) + {len(text_fallback_indices)} semantic text tracks."
+            f"      🧬 Ridge-aligned & blended {len(audio_indices)} audio tracks "
+            f"(text weight={w_text:.2f}, alpha={ridge_alpha:g}) + {len(text_fallback_indices)} aligned text tracks."
         )
 
     return result_vecs, CLAP_DIM
@@ -670,10 +739,13 @@ def main():
         sys.exit(1)
 
     clap_id = getattr(config, "CLAP_MODEL_ID", "laion/clap-htsat-unfused") if backend == "clap" else ""
+    cache_signature = f"{backend}:v4:{clap_id or MODEL_ID}"
+    if backend == "clap":
+        cache_signature += f":{config.CLAP_TEXT_BLEND_WEIGHT}:{config.CLAP_RIDGE_ALPHA}"
     for tid in track_ids:
         metadata[tid]["embed_backend"] = backend
         metadata[tid]["doc_hash"] = hashlib.sha256(
-            f"{backend}:v2:{clap_id}::{metadata[tid]['doc_hash']}".encode("utf-8")
+            f"{cache_signature}::{metadata[tid]['doc_hash']}".encode("utf-8")
         ).hexdigest()[:16]
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -685,7 +757,8 @@ def main():
     if not args.force and os.path.exists(npz_path) and os.path.exists(meta_path):
         try:
             with np.load(npz_path) as old_data:
-                old_embs = np.array(old_data["embeddings"])
+                # Processed vectors already include playlist influence; never blend them again.
+                old_embs = np.array(old_data["base_embeddings"])
                 old_tids = [str(t) for t in old_data["track_ids"]]
                 old_backend = (
                     str(old_data["embed_backend"])
@@ -721,6 +794,11 @@ def main():
             reused_count += 1
         else:
             to_embed_indices.append(idx)
+
+    # Centering and Ridge alignment depend on the whole library, not just changed tracks.
+    if backend == "clap" and (to_embed_indices or cached_vectors.keys() != set(track_ids)):
+        to_embed_indices = list(range(len(track_ids)))
+        reused_count = 0
 
     if reused_count > 0:
         print(f"      ⚡ Incremental Cache: Reused {reused_count} unchanged track vectors ({len(to_embed_indices)} new/updated).")
@@ -776,7 +854,8 @@ def main():
     else:
         print(f"\n[3/4] ⚡ All track vectors unchanged — skipping {backend.upper()} inference!")
 
-    embeddings_matrix = np.vstack(final_rows)
+    base_embeddings = np.vstack(final_rows)
+    embeddings_matrix = base_embeddings
     if coocc_weight > 0.0:
         print(f"      🎚️ Blending soft playlist co-occurrence (weight={coocc_weight:.2f}, catch-all>{int(catchall_ratio*100)}%)...")
         embeddings_matrix = apply_soft_playlist_cooccurrence(
@@ -790,32 +869,14 @@ def main():
     print("\n[4/4] Generating Output Artifacts...")
     print(f"      ✅ Generated Taste Vector Matrix of shape: {embeddings_matrix.shape}")
 
-    npz_tmp = f"{npz_path}.{os.getpid()}.tmp"
-    try:
-        with open(npz_tmp, "wb") as f:
-            np.savez(
-                f,
-                embeddings=embeddings_matrix,
-                track_ids=np.array(track_ids),
-                embed_backend=np.array(backend),
-            )
-            f.flush()
-            os.fsync(f.fileno())
-        for attempt in range(5):
-            try:
-                os.replace(npz_tmp, npz_path)
-                break
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.15 * (attempt + 1))
-    except Exception:
-        if os.path.exists(npz_tmp):
-            try:
-                os.remove(npz_tmp)
-            except OSError:
-                pass
-        raise
+    with atomic_output_file(npz_path, binary=True) as f:
+        np.savez(
+            f,
+            embeddings=embeddings_matrix,
+            base_embeddings=base_embeddings,
+            track_ids=np.array(track_ids),
+            embed_backend=np.array(backend),
+        )
 
     atomic_write_json(meta_path, metadata, indent=2)
 

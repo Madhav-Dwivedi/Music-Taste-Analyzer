@@ -225,6 +225,41 @@ def generate_html_visualizer(
             """
         )
 
+    out_idx = [i for i, cl in enumerate(track_clusters) if cl == -1]
+    if out_idx:
+        out_texts = [
+            f"<b>{html.escape(str(metadata.get(str(track_ids[i]), {}).get('name', 'Unknown')), quote=True)}</b>"
+            f" - {html.escape(str(metadata.get(str(track_ids[i]), {}).get('artists', 'Unknown')), quote=True)}"
+            f"<br>Vibe: Unclustered / Eclectic"
+            for i in out_idx
+        ]
+        traces_2d.append(
+            {
+                "x": [float(track_coords[i][0]) for i in out_idx],
+                "y": [float(track_coords[i][1]) for i in out_idx],
+                "mode": "markers",
+                "type": "scatter",
+                "name": f"Unclustered / Eclectic ({len(out_idx)})",
+                "text": out_texts,
+                "hoverinfo": "text",
+                "marker": {"size": 6, "color": "#7a7d88", "opacity": 0.42},
+            }
+        )
+        if track_coords_3d is not None and len(track_coords_3d) == len(track_coords):
+            traces_3d.append(
+                {
+                    "x": [float(track_coords_3d[i][0]) for i in out_idx],
+                    "y": [float(track_coords_3d[i][1]) for i in out_idx],
+                    "z": [float(track_coords_3d[i][2]) for i in out_idx],
+                    "mode": "markers",
+                    "type": "scatter3d",
+                    "name": f"Unclustered / Eclectic ({len(out_idx)})",
+                    "text": out_texts,
+                    "hoverinfo": "text",
+                    "marker": {"size": 3, "color": "#7a7d88", "opacity": 0.42},
+                }
+            )
+
     if len(center_coords) > 0:
         cx_vals = [float(pt[0]) for pt in center_coords]
         cy_vals = [float(pt[1]) for pt in center_coords]
@@ -621,11 +656,11 @@ def main():
         print("❌ Error: No taste clusters found in taste_profile_summary.json.")
         sys.exit(1)
 
-    # Exclude tracks filtered out by session avoid lists during clustering
+    # Exclude tracks filtered out by session avoid lists during clustering (keep unclustered -1 points)
     active_indices = [
         idx
         for idx, tid in enumerate(raw_track_ids)
-        if not metadata.get(tid, {}).get("excluded_from_taste") and metadata.get(tid, {}).get("cluster_id", 0) >= 0
+        if not metadata.get(tid, {}).get("excluded_from_taste")
     ]
     excluded_count = len(raw_track_ids) - len(active_indices)
     if not active_indices:
@@ -726,8 +761,11 @@ def main():
     sims = cosine_similarity(embeddings, cluster_centers)
     track_clusters = []
     for idx, tid in enumerate(track_ids):
-        stored_cid = metadata.get(tid, {}).get("cluster_id")
-        if isinstance(stored_cid, int) and stored_cid in valid_cids:
+        t_meta = metadata.get(tid, {})
+        stored_cid = t_meta.get("cluster_id")
+        if isinstance(stored_cid, int) and (
+            stored_cid in valid_cids or (stored_cid == -1 and not t_meta.get("excluded_from_taste"))
+        ):
             track_clusters.append(stored_cid)
         else:
             best_pos = int(np.argmax(sims[idx]))

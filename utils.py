@@ -14,6 +14,7 @@ import unicodedata
 import urllib.parse
 import uuid
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import config
@@ -60,25 +61,36 @@ def _replace_with_retry(src, dst, max_attempts=5):
             time.sleep(0.08 * (attempt + 1))
 
 
-def atomic_write_text(path, text):
-    """Atomically write UTF-8 text to path using a unique same-directory temporary file."""
+@contextmanager
+def atomic_output_file(path, binary=False):
+    """Replace path only after its temporary file has been written and flushed."""
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         os.makedirs(parent, exist_ok=True)
     tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp"
     try:
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
+        with open(
+            tmp_path,
+            "wb" if binary else "w",
+            encoding=None if binary else "utf-8",
+            newline=None if binary else "\n",
+        ) as f:
+            yield f
             f.flush()
             os.fsync(f.fileno())
         _replace_with_retry(tmp_path, path)
-    except Exception:
+    finally:
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
-        raise
+
+
+def atomic_write_text(path, text):
+    """Atomically write UTF-8 text to path."""
+    with atomic_output_file(path) as f:
+        f.write(text)
 
 
 def atomic_write_json(path, data, indent=2):
@@ -511,28 +523,6 @@ DEFAULT_AUTOMATION_SETTINGS = {
     "last_status": None,
 }
 
-DEFAULT_USER_PREFERENCES = {
-    "penalized_artists": {},
-    "avoid_artists": [],
-    "avoid_genres": [],
-    "half_life_days": 120.0,
-    "skip_penalty_enabled": True,
-    "max_liked_songs": 500,
-    "default_playlist_size": 30,
-    "default_fast_mode": False,
-    "default_public_export": False,
-    "sync_likes_to_spotify": False,
-    "active_provider": getattr(config, "DEFAULT_ACTIVE_PROVIDER", "spotify"),
-    "llm_backend": "openvino",
-    "llm_model_key": "auto",
-    "llm_device": "auto",
-    "ollama_url": getattr(config, "DEFAULT_OLLAMA_URL", "http://127.0.0.1:11434"),
-    "ollama_model": getattr(config, "DEFAULT_OLLAMA_MODEL", "qwen3:8b"),
-    "cluster_labels": {},
-    "presets": dict(DEFAULT_BUILTIN_PRESETS),
-    "automation": dict(DEFAULT_AUTOMATION_SETTINGS),
-}
-
 _CAMELOT_MAJOR = {0: 8, 1: 3, 2: 10, 3: 5, 4: 12, 5: 7, 6: 2, 7: 9, 8: 4, 9: 11, 10: 6, 11: 1}
 _CAMELOT_MINOR = {0: 5, 1: 12, 2: 7, 3: 2, 4: 9, 5: 4, 6: 11, 7: 6, 8: 1, 9: 8, 10: 3, 11: 10}
 
@@ -690,7 +680,11 @@ def get_effective_preferences():
         "presets": _sanitize_presets(None),
         "automation": dict(DEFAULT_AUTOMATION_SETTINGS),
     }
-    raw = load_user_preferences()
+    return _apply_preference_updates(prefs, load_user_preferences())
+
+
+def _apply_preference_updates(prefs, raw):
+    """Apply the same validation when loading preferences and saving partial updates."""
     if not isinstance(raw, dict):
         return prefs
 
@@ -748,91 +742,16 @@ def get_effective_preferences():
             for k, v in raw["cluster_labels"].items()
             if str(v or "").strip()
         }
-    if "presets" in raw:
+    if isinstance(raw.get("presets"), dict):
         prefs["presets"] = _sanitize_presets(raw.get("presets"))
-    if "automation" in raw:
+    if isinstance(raw.get("automation"), dict):
         prefs["automation"] = _sanitize_automation(raw.get("automation"), base=prefs["automation"])
     return prefs
 
 
 def save_user_preferences(updates):
     """Validate, merge, and atomically save user preferences to user_preferences.json."""
-    current = get_effective_preferences()
-    if isinstance(updates, dict):
-        if "penalized_artists" in updates and isinstance(updates["penalized_artists"], dict):
-            clean_pen = {}
-            for k, v in updates["penalized_artists"].items():
-                ck = str(k or "").strip()
-                if ck:
-                    clean_pen[ck] = _clamp_pref_float(v, 0.0, 2.0, 0.05)
-            current["penalized_artists"] = clean_pen
-        if "avoid_artists" in updates:
-            current["avoid_artists"] = normalize_avoid_list(updates["avoid_artists"])
-        if "avoid_genres" in updates:
-            current["avoid_genres"] = normalize_avoid_list(updates["avoid_genres"])
-        if "half_life_days" in updates:
-            current["half_life_days"] = _clamp_pref_float(
-                updates["half_life_days"], 7.0, 1825.0, current["half_life_days"]
-            )
-        if "skip_penalty_enabled" in updates and isinstance(updates["skip_penalty_enabled"], bool):
-            current["skip_penalty_enabled"] = updates["skip_penalty_enabled"]
-        if "max_liked_songs" in updates:
-            current["max_liked_songs"] = _clamp_pref_int(
-                updates["max_liked_songs"], 50, 5000, current["max_liked_songs"]
-            )
-        if "default_playlist_size" in updates:
-            current["default_playlist_size"] = _clamp_pref_int(
-                updates["default_playlist_size"], 5, 100, current["default_playlist_size"]
-            )
-        if "default_fast_mode" in updates and isinstance(updates["default_fast_mode"], bool):
-            current["default_fast_mode"] = updates["default_fast_mode"]
-        if "default_public_export" in updates and isinstance(updates["default_public_export"], bool):
-            current["default_public_export"] = updates["default_public_export"]
-        if "sync_likes_to_spotify" in updates and isinstance(updates["sync_likes_to_spotify"], bool):
-            current["sync_likes_to_spotify"] = updates["sync_likes_to_spotify"]
-        if "active_provider" in updates:
-            prov = str(updates["active_provider"] or "").strip().lower()
-            if prov in ("spotify", "ytmusic", "unified"):
-                current["active_provider"] = prov
-        if "embed_backend" in updates:
-            eb = str(updates["embed_backend"] or "").strip().lower()
-            if eb in ("minilm", "clap"):
-                current["embed_backend"] = eb
-        if "playlist_cooccurrence_weight" in updates:
-            current["playlist_cooccurrence_weight"] = _clamp_pref_float(
-                updates["playlist_cooccurrence_weight"], 0.0, 0.35, current["playlist_cooccurrence_weight"]
-            )
-        if "llm_backend" in updates:
-            lb = str(updates["llm_backend"] or "").strip().lower()
-            if lb in ("openvino", "ollama", "openai_local"):
-                current["llm_backend"] = lb
-        if "llm_model_key" in updates:
-            mk = str(updates["llm_model_key"] or "").strip()
-            if mk in _valid_llm_model_keys():
-                current["llm_model_key"] = mk
-        if "llm_device" in updates:
-            dv = str(updates["llm_device"] or "").strip()
-            if dv.lower() == "auto":
-                current["llm_device"] = "auto"
-            elif dv.upper() in ("GPU", "CPU", "NPU"):
-                current["llm_device"] = dv.upper()
-        if "ollama_url" in updates:
-            current["ollama_url"] = _sanitize_llm_url(updates["ollama_url"], default=current["ollama_url"])
-        if "ollama_model" in updates:
-            om = str(updates["ollama_model"] or "").strip()[:120]
-            if om:
-                current["ollama_model"] = om
-        if "cluster_labels" in updates and isinstance(updates["cluster_labels"], dict):
-            current["cluster_labels"] = {
-                str(k): str(v).strip()[:80]
-                for k, v in updates["cluster_labels"].items()
-                if str(v or "").strip()
-            }
-        if "presets" in updates and isinstance(updates["presets"], dict):
-            current["presets"] = _sanitize_presets(updates["presets"])
-        if "automation" in updates and isinstance(updates["automation"], dict):
-            current["automation"] = _sanitize_automation(updates["automation"], base=current["automation"])
-
+    current = _apply_preference_updates(get_effective_preferences(), updates)
     prefs_path = getattr(config, "USER_PREFS_FILE", os.path.join(config.BASE_DIR, "user_preferences.json"))
     atomic_write_json(prefs_path, current, indent=2)
     return current
@@ -1543,20 +1462,8 @@ def extract_uploaded_history_bytes(filename, raw_bytes, dest_dir=None):
 
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", base)
         out_path = os.path.join(target_dir, safe_name)
-        tmp_path = f"{out_path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp"
-        try:
-            with open(tmp_path, "wb") as f:
-                f.write(data_bytes)
-                f.flush()
-                os.fsync(f.fileno())
-            _replace_with_retry(tmp_path, out_path)
-        except Exception:
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-            raise
+        with atomic_output_file(out_path, binary=True) as f:
+            f.write(data_bytes)
         saved_files.append(safe_name)
 
     if lower.endswith(".zip"):

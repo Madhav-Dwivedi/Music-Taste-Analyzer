@@ -45,6 +45,7 @@ extended_history/
 01_Data_Extractor/user_music_profile.json
 01_Data_Extractor/ytmusic_profile.json
 02_Vector_Core/taste_vectors.npz
+02_Vector_Core/clap_audio_cache.npz
 02_Vector_Core/track_metadata.json
 02_Vector_Core/taste_profile_summary.json
 02_Vector_Core/taste_map_data.json

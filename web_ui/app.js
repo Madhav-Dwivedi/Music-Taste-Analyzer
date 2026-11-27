@@ -69,10 +69,12 @@
         return /^https?:\/\//i.test(s) ? s : "";
     }
 
-    function openPreviewTrack(trackOrId, title) {
+    async function openPreviewTrack(trackOrId, title) {
         let spId = "";
         let vid = "";
         let prov = "";
+        let trackName = "";
+        let trackArtist = "";
         let label = title || "Track Preview";
 
         if (trackOrId && typeof trackOrId === "object") {
@@ -85,10 +87,10 @@
             }
             vid = extractYtmVid(trackOrId.video_id || rawId);
             prov = String(trackOrId.provider || "").toLowerCase();
+            trackName = String(trackOrId.name || "").trim();
+            trackArtist = String(trackOrId.artist || "").trim();
             if (!title) {
-                label = trackOrId.artist
-                    ? `${trackOrId.name || "Track"} — ${trackOrId.artist}`
-                    : (trackOrId.name || "Track Preview");
+                label = trackArtist ? `${trackName || "Track"} — ${trackArtist}` : (trackName || "Track Preview");
             }
         } else {
             const raw = String(trackOrId || "").trim();
@@ -96,20 +98,75 @@
             if (!raw.startsWith("yt:") && SPOTIFY_ID_RE.test(raw)) spId = raw;
         }
 
+        if (!trackName && label.includes(" — ")) {
+            const parts = label.split(" — ");
+            trackName = parts[0].trim();
+            if (!trackArtist) trackArtist = parts.slice(1).join(" — ").trim();
+        }
+
         const preferYtm = Boolean(vid && (!spId || state.activeProvider === "ytmusic" || prov === "ytmusic"));
         const iframe = document.getElementById("previewIframe");
+        const audioWrap = document.getElementById("previewAudioWrap");
+        const audioEl = document.getElementById("previewAudio");
+        const audioMeta = document.getElementById("previewAudioMeta");
+        const extLink = document.getElementById("previewExternalLink");
         const ytmEmbedUrl = (videoId) =>
             `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&origin=${encodeURIComponent(window.location.origin)}`;
-        if (preferYtm) {
+
+        const mySeq = (state.previewSeq = (state.previewSeq || 0) + 1);
+        audioEl.pause();
+        audioEl.removeAttribute("src");
+        audioEl.load();
+        iframe.src = "about:blank";
+
+        if (extLink) {
+            const extHref = preferYtm && vid
+                ? `https://music.youtube.com/watch?v=${encodeURIComponent(vid)}`
+                : (spId ? `https://open.spotify.com/track/${encodeURIComponent(spId)}` : (vid ? `https://music.youtube.com/watch?v=${encodeURIComponent(vid)}` : ""));
+            if (extHref) {
+                extLink.href = extHref;
+                extLink.textContent = preferYtm || (!spId && vid) ? "Open in YT Music ↗" : "Open in Spotify ↗";
+                extLink.style.display = "inline-flex";
+            } else {
+                extLink.style.display = "none";
+            }
+        }
+
+        if ((preferYtm || (!spId && vid)) && trackName) {
             document.getElementById("previewTrackTitle").textContent = label;
-            iframe.height = "180";
-            iframe.referrerPolicy = "strict-origin-when-cross-origin";
-            iframe.src = ytmEmbedUrl(vid);
+            iframe.style.display = "none";
+            audioWrap.style.display = "flex";
+            audioMeta.textContent = "Loading 30s audio preview…";
             document.getElementById("previewDock").style.display = "block";
+            try {
+                const qs = new URLSearchParams({ title: trackName, artist: trackArtist });
+                const res = await api(`/api/preview-audio?${qs.toString()}`);
+                if (state.previewSeq !== mySeq) return;
+                if (res?.found && res.preview_url) {
+                    audioMeta.textContent = `30s audio preview${res.album ? ` · ${res.album}` : ""}`;
+                    audioEl.src = res.preview_url;
+                    audioEl.play().catch(() => {});
+                    return;
+                }
+            } catch {
+                if (state.previewSeq !== mySeq) return;
+            }
+            if (vid) {
+                audioWrap.style.display = "none";
+                iframe.style.display = "block";
+                iframe.height = "180";
+                iframe.referrerPolicy = "strict-origin-when-cross-origin";
+                iframe.src = ytmEmbedUrl(vid);
+                return;
+            }
+            audioMeta.textContent = "No audio preview available for this track.";
             return;
         }
+
         if (spId) {
             document.getElementById("previewTrackTitle").textContent = label;
+            audioWrap.style.display = "none";
+            iframe.style.display = "block";
             iframe.height = "80";
             iframe.src = `https://open.spotify.com/embed/track/${encodeURIComponent(spId)}?utm_source=generator&theme=0`;
             document.getElementById("previewDock").style.display = "block";
@@ -117,6 +174,8 @@
         }
         if (vid) {
             document.getElementById("previewTrackTitle").textContent = label;
+            audioWrap.style.display = "none";
+            iframe.style.display = "block";
             iframe.height = "180";
             iframe.referrerPolicy = "strict-origin-when-cross-origin";
             iframe.src = ytmEmbedUrl(vid);
@@ -127,6 +186,14 @@
     }
 
     function closePreviewDock() {
+        state.previewSeq = (state.previewSeq || 0) + 1;
+        const audioEl = document.getElementById("previewAudio");
+        if (audioEl) {
+            audioEl.pause();
+            audioEl.removeAttribute("src");
+            audioEl.load();
+        }
+        document.getElementById("previewAudioWrap").style.display = "none";
         document.getElementById("previewDock").style.display = "none";
         document.getElementById("previewIframe").src = "about:blank";
     }
@@ -924,9 +991,8 @@
             });
         }
 
-        (data.clusters || []).forEach((c, idx) => {
-            const color = CLUSTER_COLORS[idx % CLUSTER_COLORS.length];
-            const pts = (data.tracks || []).filter((t) => t.cluster_id === c.cluster_id);
+        const appendTrackGroupTrace = (pts, color, legendName, clusterLabel, options = {}) => {
+            const { collectCentroid = false, clusterId = -1, sizeScale = 1.0, fixedOp = null } = options;
             const x = [];
             const y = [];
             const z = [];
@@ -940,9 +1006,10 @@
             const indexedItems = [];
 
             pts.forEach((t) => {
-                const baseSize2d = Math.min(20, Math.max(5, Math.round(4 + Math.pow(t.recency_weight || 1, 0.6) * 2)));
-                const baseSize3d = Math.max(3, Math.round(baseSize2d * 0.55));
-                const baseOp = Math.min(1.0, Math.max(0.35, 0.35 + (t.recency_weight || 1) / 30.0));
+                const raw2d = Math.min(20, Math.max(5, Math.round(4 + Math.pow(t.recency_weight || 1, 0.6) * 2)));
+                const baseSize2d = Math.max(4, Math.round(raw2d * sizeScale));
+                const baseSize3d = Math.max(2.5, Math.round(baseSize2d * 0.55));
+                const baseOp = fixedOp != null ? fixedOp : Math.min(1.0, Math.max(0.35, 0.35 + (t.recency_weight || 1) / 30.0));
                 const item = {
                     searchKey: `${t.name} ${t.artist} ${t.genres}`.toLowerCase(),
                     weight: Number(t.recency_weight || 0),
@@ -969,13 +1036,15 @@
                     id: t.id || "",
                     vid: t.video_id || "",
                     provider: t.provider || "spotify",
+                    name: t.name || "",
+                    artist: t.artist || "",
                     label: `${t.name} — ${t.artist}`,
                 });
 
                 const afLine = t.bpm != null ? `<br>Audio: ${t.bpm} BPM | Energy ${t.energy} | Valence ${t.valence}` : "";
                 texts.push(
                     `<b>${escapeHtml(t.name)}</b> — ${escapeHtml(t.artist)}` +
-                    `<br>Cluster: ${escapeHtml(c.vibe_label)}` +
+                    `<br>Cluster: ${escapeHtml(clusterLabel)}` +
                     `<br>Genres: ${escapeHtml(t.genres || "None")}` +
                     afLine +
                     `<br>Weight: ${t.recency_weight}` +
@@ -983,16 +1052,13 @@
                 );
             });
 
-            if (pts.length) {
-                const cx = x.reduce((acc, v) => acc + v, 0) / x.length;
-                const cy = y.reduce((acc, v) => acc + v, 0) / y.length;
-                const cz = z.reduce((acc, v) => acc + v, 0) / z.length;
+            if (collectCentroid && pts.length) {
                 centroids.push({
-                    cx,
-                    cy,
-                    cz,
+                    cx: x.reduce((acc, v) => acc + v, 0) / x.length,
+                    cy: y.reduce((acc, v) => acc + v, 0) / y.length,
+                    cz: z.reduce((acc, v) => acc + v, 0) / z.length,
                     color,
-                    label: `C${c.cluster_id} · ${c.vibe_label}`,
+                    label: `C${clusterId} · ${clusterLabel}`,
                 });
             }
 
@@ -1006,7 +1072,7 @@
                 x, y,
                 mode: "markers",
                 type: state.is3d ? "scatter3d" : "scatter",
-                name: `C${c.cluster_id}: ${c.vibe_label} (${c.weighted_share_pct}%)`,
+                name: legendName,
                 text: texts,
                 customdata: meta,
                 hoverinfo: "text",
@@ -1014,7 +1080,30 @@
             };
             if (state.is3d) trace.z = z;
             traces.push(trace);
+        };
+
+        (data.clusters || []).forEach((c, idx) => {
+            const color = CLUSTER_COLORS[idx % CLUSTER_COLORS.length];
+            const pts = (data.tracks || []).filter((t) => t.cluster_id === c.cluster_id);
+            appendTrackGroupTrace(
+                pts,
+                color,
+                `C${c.cluster_id}: ${c.vibe_label} (${c.weighted_share_pct}%)`,
+                c.vibe_label,
+                { collectCentroid: true, clusterId: c.cluster_id }
+            );
         });
+
+        const unclusteredPts = (data.tracks || []).filter((t) => t.cluster_id === -1);
+        if (unclusteredPts.length) {
+            appendTrackGroupTrace(
+                unclusteredPts,
+                "#7a7d88",
+                `Unclustered / Eclectic (${unclusteredPts.length})`,
+                "Unclustered / Eclectic",
+                { collectCentroid: false, sizeScale: 0.78, fixedOp: 0.42 }
+            );
+        }
 
         if (showCentroids && centroids.length) {
             const centroidTrace = {
@@ -1123,7 +1212,7 @@
             if (!cd || typeof cd !== "object") return;
             const action = document.getElementById("mapClickAction").value;
             if (action === "preview" && (cd.id || cd.vid)) {
-                openPreviewTrack({ id: cd.id, video_id: cd.vid, provider: cd.provider, name: cd.label }, cd.label);
+                openPreviewTrack({ id: cd.id, video_id: cd.vid, provider: cd.provider, name: cd.name || cd.label, artist: cd.artist || "" }, cd.label);
             } else {
                 const targetUrl = safeHttpUrl(cd.url || cd.yt_url);
                 if (targetUrl) window.open(targetUrl, "_blank", "noopener,noreferrer");
