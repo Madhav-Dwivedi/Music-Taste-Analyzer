@@ -162,6 +162,8 @@ RECCOBEATS_NOT_FOUND_TTL_DAYS = 14
 EXTENDED_HISTORY_HALF_LIFE_DAYS = 120.0
 MIN_CLUSTERS = 3
 MAX_CLUSTERS = 10
+DEFAULT_CLUSTER_METHOD = "gmm"
+GMM_PCA_DIMS = 20
 
 # Optional per-artist clustering weight multipliers (exact artist names, case-insensitive).
 # You can also define {"penalized_artists": {"Artist Name": 0.05}} in user_preferences.json.

@@ -308,6 +308,108 @@ def choose_optimal_k(embeddings, weights, min_k=3, max_k=7):
     return best_k
 
 
+def _reduce_for_clustering(embeddings, max_dims=20):
+    """Compress high-D vectors with PCA before fitting GMM to avoid covariance overfitting."""
+    import numpy as np
+    from sklearn.decomposition import PCA
+
+    mat = np.asarray(embeddings, dtype=float)
+    n_samples, dim = mat.shape
+    if dim <= max_dims or n_samples <= max_dims + 2:
+        return mat
+    n_comp = min(int(max_dims), n_samples - 1, dim)
+    pca = PCA(n_components=n_comp, random_state=42)
+    return pca.fit_transform(mat)
+
+
+def fit_gmm_clusters(embeddings, weights, min_k=3, max_k=10, fixed_k=None, pca_dims=20):
+    """Fit diagonal Gaussian Mixture Models on PCA-compressed vectors, selecting k via lowest BIC."""
+    import numpy as np
+    from sklearn.mixture import GaussianMixture
+
+    mat = np.asarray(embeddings, dtype=float)
+    n_samples = len(mat)
+    w_arr = np.asarray(weights, dtype=float)
+    if len(w_arr) != n_samples or float(w_arr.sum()) <= 0.0:
+        w_arr = np.ones(n_samples, dtype=float)
+
+    if n_samples <= 1:
+        center = mat[0].copy() if n_samples == 1 else np.zeros(mat.shape[1], dtype=float)
+        c_norm = float(np.linalg.norm(center))
+        if c_norm > 0:
+            center = center / c_norm
+        return np.zeros(n_samples, dtype=int), np.array([center]), np.ones((n_samples, 1), dtype=float), {}
+
+    x_pca = _reduce_for_clustering(mat, max_dims=pca_dims)
+    k_low = max(2, min(int(min_k), n_samples - 1))
+    k_high = max(k_low, min(int(max_k), n_samples - 1))
+
+    if fixed_k is not None:
+        ks_to_try = [max(1, min(int(fixed_k), n_samples - 1))]
+    elif n_samples < 15:
+        ks_to_try = [max(1, min(k_low, n_samples))]
+    else:
+        ks_to_try = list(range(k_low, k_high + 1))
+
+    min_cluster_size = max(3, int(0.015 * n_samples)) if n_samples >= 60 else 1
+    best_gmm = None
+    best_bic = float("inf")
+    bic_scores = {}
+
+    for k in ks_to_try:
+        gmm = GaussianMixture(
+            n_components=k,
+            covariance_type="diag",
+            reg_covar=1e-4,
+            n_init=5,
+            random_state=42,
+        )
+        gmm.fit(x_pca)
+        bic = float(gmm.bic(x_pca))
+        bic_scores[k] = round(bic, 1)
+
+        hard_labels = gmm.predict(x_pca)
+        counts = np.bincount(hard_labels, minlength=k)
+        non_empty = int(np.sum(counts > 0))
+        smallest = int(np.min(counts)) if non_empty == k else 0
+
+        is_degenerate = fixed_k is None and k > k_low and (non_empty < k or smallest < min_cluster_size)
+        if is_degenerate:
+            continue
+        if bic < best_bic or best_gmm is None:
+            best_bic = bic
+            best_gmm = gmm
+
+    if best_gmm is None:
+        best_gmm = GaussianMixture(
+            n_components=ks_to_try[0],
+            covariance_type="diag",
+            reg_covar=1e-4,
+            n_init=5,
+            random_state=42,
+        ).fit(x_pca)
+
+    probs = best_gmm.predict_proba(x_pca)
+    labels = np.argmax(probs, axis=1)
+    n_comp = probs.shape[1]
+
+    centers = []
+    for c in range(n_comp):
+        soft_w = w_arr * probs[:, c]
+        if float(soft_w.sum()) <= 1e-9:
+            soft_w = probs[:, c]
+        if float(soft_w.sum()) <= 1e-9:
+            c_vec = np.mean(mat, axis=0)
+        else:
+            c_vec = np.average(mat, axis=0, weights=soft_w)
+        c_norm = float(np.linalg.norm(c_vec))
+        if c_norm > 0:
+            c_vec = c_vec / c_norm
+        centers.append(c_vec)
+
+    return labels, np.vstack(centers), probs, bic_scores
+
+
 def build_vibe_label(cluster_id, top_genre_names, anchor_tracks, cluster_size, used_labels, used_artists):
     """Construct a human-readable, guaranteed-unique vibe title for a cluster."""
     artist_counts = {}
@@ -514,6 +616,13 @@ def main():
         default=None,
         help="Music provider profile to load (default: active preference)",
     )
+    parser.add_argument(
+        "--method",
+        choices=["auto", "gmm", "kmeans"],
+        default="auto",
+        help="Clustering algorithm: gmm (PCA+GMM+BIC) or kmeans (default: auto)",
+    )
+    parser.add_argument("--k", type=int, default=None, help="Optional fixed number of clusters")
     args = parser.parse_args()
 
     import numpy as np
@@ -623,15 +732,39 @@ def main():
         f"Skip penalty: {'ON' if skip_penalty_enabled else 'OFF'})"
     )
 
-    print("\n[3/3] Analyzing Taste Sub-Clusters (Adaptive Time-Weighted K-Means)...")
+    cluster_method = (
+        getattr(config, "DEFAULT_CLUSTER_METHOD", "gmm") if args.method == "auto" else args.method
+    )
     min_k = int(getattr(config, "MIN_CLUSTERS", 3))
-    max_k = int(getattr(config, "MAX_CLUSTERS", 7))
-    n_clusters = choose_optimal_k(kept_embeddings, weights, min_k=min_k, max_k=max_k)
+    max_k = int(getattr(config, "MAX_CLUSTERS", 10))
+    pca_dims = int(getattr(config, "GMM_PCA_DIMS", 20))
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    kmeans.fit(kept_embeddings, sample_weight=weights)
-    labels = kmeans.labels_
-    cluster_centers = kmeans.cluster_centers_
+    probs = None
+    if cluster_method == "gmm":
+        print(f"\n[3/3] Analyzing Taste Sub-Clusters (PCA-{pca_dims} + GMM + BIC)...")
+        labels, cluster_centers, probs, bic_scores = fit_gmm_clusters(
+            kept_embeddings,
+            weights,
+            min_k=min_k,
+            max_k=max_k,
+            fixed_k=args.k,
+            pca_dims=pca_dims,
+        )
+        n_clusters = len(cluster_centers)
+        if bic_scores:
+            bic_line = " | ".join(f"k={kk}:{vv:.0f}" for kk, vv in sorted(bic_scores.items()))
+            print(f"      -> Selected k={n_clusters} via BIC ({bic_line})")
+    else:
+        print("\n[3/3] Analyzing Taste Sub-Clusters (Adaptive Time-Weighted K-Means)...")
+        n_clusters = (
+            max(1, min(int(args.k), len(kept_embeddings) - 1))
+            if args.k is not None
+            else choose_optimal_k(kept_embeddings, weights, min_k=min_k, max_k=max_k)
+        )
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        kmeans.fit(kept_embeddings, sample_weight=weights)
+        labels = kmeans.labels_
+        cluster_centers = kmeans.cluster_centers_
 
     master_centroid = np.average(kept_embeddings, axis=0, weights=weights)
     mc_norm = np.linalg.norm(master_centroid)
@@ -739,6 +872,16 @@ def main():
         metadata[tid]["recency_weight"] = float(weights[kept_pos])
         metadata[tid]["cluster_id"] = int(raw_to_seq_id.get(int(labels[kept_pos]), 0))
         metadata[tid]["excluded_from_taste"] = False
+        if probs is not None:
+            row_p = probs[kept_pos]
+            top2_idx = np.argsort(row_p)[::-1][:2]
+            metadata[tid]["cluster_probs"] = [
+                {"cluster_id": int(raw_to_seq_id.get(int(ci), 0)), "prob": round(float(row_p[ci]), 3)}
+                for ci in top2_idx
+                if float(row_p[ci]) >= 0.05 and int(ci) in raw_to_seq_id
+            ]
+        else:
+            metadata[tid].pop("cluster_probs", None)
         if tid in skip_ratios:
             metadata[tid]["skip_ratio"] = skip_ratios[tid]
 
@@ -758,6 +901,7 @@ def main():
     )
 
     profile_summary = {
+        "cluster_method": cluster_method,
         "master_taste_centroid": master_centroid.tolist(),
         "clusters": clusters_out,
         "yearly_centroids": yearly_centroids,

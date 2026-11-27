@@ -19,6 +19,7 @@ for sub in (
 import deezer_audio_client as dz
 import discovery_engine
 import npu_vectorizer
+import taste_clusterer
 
 
 class TestClapAndEnrichment(unittest.TestCase):
@@ -116,6 +117,36 @@ class TestClapAndEnrichment(unittest.TestCase):
             out = discovery_engine.embed_texts(["chill synth", "jazz piano"], fake_proc, fake_model)
             mock_fn.assert_called_once()
             self.assertEqual(out.shape, (2, 512))
+
+    def test_fit_gmm_clusters_recovers_synthetic_modes_and_soft_probs(self):
+        rng = np.random.RandomState(7)
+        dim = 64
+        n_per = 30
+        base_dirs = np.eye(4, dim, dtype=float)
+        pts = []
+        true_labels = []
+        for cid in range(4):
+            noise = rng.normal(0.0, 0.04, size=(n_per, dim))
+            cluster_pts = base_dirs[cid] + noise
+            cluster_pts /= np.linalg.norm(cluster_pts, axis=1, keepdims=True)
+            pts.append(cluster_pts)
+            true_labels.extend([cid] * n_per)
+
+        embs = np.vstack(pts)
+        weights = np.ones(len(embs), dtype=float)
+        labels, centers, probs, bic_scores = taste_clusterer.fit_gmm_clusters(
+            embs, weights, min_k=2, max_k=7, pca_dims=12
+        )
+        self.assertEqual(len(centers), 4)
+        self.assertEqual(probs.shape, (120, 4))
+        np.testing.assert_allclose(probs.sum(axis=1), np.ones(120), atol=1e-5)
+        np.testing.assert_allclose(np.linalg.norm(centers, axis=1), np.ones(4), atol=1e-5)
+        self.assertEqual(len(set(labels.tolist())), 4)
+        self.assertIn(4, bic_scores)
+        # Every true cluster maps cleanly to one unique GMM cluster
+        for cid in range(4):
+            slice_labels = labels[cid * n_per : (cid + 1) * n_per]
+            self.assertEqual(len(set(slice_labels.tolist())), 1)
 
 
 if __name__ == "__main__":
