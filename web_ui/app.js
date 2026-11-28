@@ -10,6 +10,11 @@
         mapData: null,
         is3d: false,
         drillClusterId: null,
+        mapViewCache: new Map(),
+        mapCacheSource: null,
+        mapLegendClusterIds: {},
+        overviewRenderedKey: null,
+        drillRenderedKey: null,
         analytics: null,
         sse: null,
         feedback: { liked: {}, disliked: {} },
@@ -874,8 +879,25 @@
         };
     }
 
+    function getActivePlotEl() {
+        const isDrilled = Boolean(getActiveDrillCluster()?.subclusters?.length);
+        const drillEl = document.getElementById("tasteMapDrillPlot");
+        if (isDrilled && drillEl && drillEl.dataset?.role === "drill") {
+            return drillEl;
+        }
+        return document.getElementById("tasteMapPlot");
+    }
+
+    function setPlotLayerVisibility(isDrilled) {
+        const overviewEl = document.getElementById("tasteMapPlot");
+        const drillEl = document.getElementById("tasteMapDrillPlot");
+        if (!drillEl || drillEl.dataset?.role !== "drill") return;
+        overviewEl?.classList?.toggle("plot-hidden", isDrilled);
+        drillEl.classList?.toggle("plot-active", isDrilled);
+    }
+
     function applyTasteMapFilter() {
-        const plotEl = document.getElementById("tasteMapPlot");
+        const plotEl = getActivePlotEl();
         if (!state.mapData || typeof Plotly === "undefined" || !plotEl || !plotEl.data || !state.mapTraceIndex.length) {
             renderTasteMapPlot();
             return;
@@ -934,7 +956,7 @@
     }
 
     function updateTasteMapClouds() {
-        const plotEl = document.getElementById("tasteMapPlot");
+        const plotEl = getActivePlotEl();
         if (typeof Plotly === "undefined" || !plotEl?.data) return;
         const indices = plotEl.data.flatMap((trace, idx) => trace.meta?.layer === "cluster-cloud" ? [idx] : []);
         if (!indices.length) return;
@@ -1029,7 +1051,53 @@
         return (state.mapData.clusters || []).find((c) => Number(c.cluster_id) === Number(state.drillClusterId)) || null;
     }
 
-    function syncMapDrillView() {
+    function setMapLoading(visible, text = "Rendering map…") {
+        const overlay = document.getElementById("mapLoadingOverlay");
+        if (!overlay) return;
+        const txt = document.getElementById("mapLoadingText");
+        if (txt && text) txt.textContent = text;
+        overlay.style.display = visible ? "flex" : "none";
+    }
+
+    function runWithMapLoader(text, workFn) {
+        if (typeof requestAnimationFrame !== "function") {
+            return Promise.resolve().then(workFn);
+        }
+        setMapLoading(true, text);
+        return new Promise((resolve) => {
+            requestAnimationFrame(() => {
+                setTimeout(() => {
+                    Promise.resolve(workFn())
+                        .catch(() => {})
+                        .finally(() => {
+                            setMapLoading(false);
+                            resolve();
+                        });
+                }, 0);
+            });
+        });
+    }
+
+    function sampleHullPoints3D(points, maxPts = 28) {
+        if (!Array.isArray(points) || points.length <= maxPts) return points || [];
+        // Keep the 6 axis extremes + farthest points from centroid so the 3D hull shape stays intact
+        // while keeping Plotly's synchronous Delaunay alphahull fast (<2ms per cloud).
+        const n = points.length;
+        const mx = points.reduce((s, p) => s + p.x, 0) / n;
+        const my = points.reduce((s, p) => s + p.y, 0) / n;
+        const mz = points.reduce((s, p) => s + (p.z || 0), 0) / n;
+        const ranked = points
+            .map((p, idx) => ({ p, d: Math.hypot(p.x - mx, p.y - my, (p.z || 0) - mz), idx }))
+            .sort((a, b) => b.d - a.d);
+        const picked = [];
+        const step = Math.max(1, Math.floor(ranked.length / maxPts));
+        for (let i = 0; i < ranked.length && picked.length < maxPts; i += step) {
+            picked.push(ranked[i].p);
+        }
+        return picked;
+    }
+
+    function syncMapDrillView(withLoader = false) {
         const data = state.mapData;
         if (!data) return;
         const drillBar = document.getElementById("mapDrillBar");
@@ -1037,20 +1105,36 @@
         const drillMeta = document.getElementById("mapDrillMeta");
         const active = getActiveDrillCluster();
 
-        if (active && Array.isArray(active.subclusters) && active.subclusters.length) {
-            if (drillBar) drillBar.style.display = "flex";
-            if (drillTitle) drillTitle.textContent = `C${active.cluster_id}: ${active.vibe_label}`;
-            if (drillMeta) drillMeta.textContent = `${active.track_count} tracks · ${active.subclusters.length} sub-vibes`;
-            renderTasteMapPlot();
-            renderClusterRadar(active.subclusters.map((sc) => ({ ...sc, cluster_id: `S${sc.sub_cluster_id}` })));
-            renderClusterCards(active.subclusters, active);
-        } else {
+        const applyView = () => {
+            if (active && Array.isArray(active.subclusters) && active.subclusters.length) {
+                if (drillBar) drillBar.style.display = "flex";
+                if (drillTitle) drillTitle.textContent = `C${active.cluster_id}: ${active.vibe_label}`;
+                if (drillMeta) drillMeta.textContent = `${active.track_count} tracks · ${active.subclusters.length} sub-vibes`;
+                renderClusterCards(active.subclusters, active);
+                const p = renderTasteMapPlot();
+                if (typeof setTimeout === "function") {
+                    setTimeout(() => renderClusterRadar(active.subclusters.map((sc) => ({ ...sc, cluster_id: `S${sc.sub_cluster_id}` }))), 0);
+                } else {
+                    renderClusterRadar(active.subclusters.map((sc) => ({ ...sc, cluster_id: `S${sc.sub_cluster_id}` })));
+                }
+                return p;
+            }
             state.drillClusterId = null;
             if (drillBar) drillBar.style.display = "none";
-            renderTasteMapPlot();
-            renderClusterRadar(data.clusters || []);
             renderClusterCards(data.clusters || [], null);
+            const p = renderTasteMapPlot();
+            if (typeof setTimeout === "function") {
+                setTimeout(() => renderClusterRadar(data.clusters || []), 0);
+            } else {
+                renderClusterRadar(data.clusters || []);
+            }
+            return p;
+        };
+
+        if (withLoader && state.is3d && active) {
+            return runWithMapLoader(`Zooming into ${active.vibe_label}…`, applyView);
         }
+        return applyView();
     }
 
     function enterClusterDrill(cid) {
@@ -1060,28 +1144,27 @@
             return;
         }
         state.drillClusterId = Number(cid);
-        syncMapDrillView();
-        document.getElementById("tasteMapPlot")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        syncMapDrillView(true);
     }
 
     function exitClusterDrill() {
         if (state.drillClusterId === null) return;
         state.drillClusterId = null;
-        syncMapDrillView();
+        syncMapDrillView(true);
     }
 
     function renderTasteMapPlot() {
         const data = state.mapData;
         if (!data) return;
-        const plotEl = document.getElementById("tasteMapPlot");
+        const activeDrill = getActiveDrillCluster();
+        const isDrilled = Boolean(activeDrill && Array.isArray(activeDrill.subclusters) && activeDrill.subclusters.length);
+        setPlotLayerVisibility(isDrilled);
+        const plotEl = getActivePlotEl();
         if (typeof Plotly === "undefined") {
             document.getElementById("mapOfflineBanner").style.display = "block";
             return;
         }
         document.getElementById("mapOfflineBanner").style.display = "none";
-
-        const activeDrill = getActiveDrillCluster();
-        const isDrilled = Boolean(activeDrill && Array.isArray(activeDrill.subclusters) && activeDrill.subclusters.length);
 
         const q = document.getElementById("mapSearchBox").value.trim().toLowerCase();
         const minW = getMapMinWeight();
@@ -1090,332 +1173,402 @@
         const showCentroids = document.getElementById("chkShowCentroids")?.checked !== false;
         const showClouds = document.getElementById("chkShowClouds")?.checked !== false;
 
+        if (state.mapCacheSource !== data) {
+            state.mapViewCache.clear();
+            state.mapCacheSource = data;
+            state.overviewRenderedKey = null;
+            state.drillRenderedKey = null;
+        }
+        const cacheKey = `${state.is3d ? "3d" : "2d"}:${isDrilled ? activeDrill.cluster_id : "all"}:${showCentroids ? 1 : 0}:${showEraPath ? 1 : 0}`;
+        let cached = state.mapViewCache.get(cacheKey);
         let matches = 0;
-        const traces = [];
-        const centroids = [];
-        const legendClusterIds = {};
-        state.mapTraceIndex = [];
 
-        const displayGroups = isDrilled
-            ? activeDrill.subclusters.map((sc, idx) => ({
-                  id: sc.sub_cluster_id,
-                  prefix: "S",
-                  label: sc.vibe_label,
-                  share: sc.raw_percentage,
-                  color: CLUSTER_COLORS[idx % CLUSTER_COLORS.length],
-                  pts: (data.tracks || []).filter(
-                      (t) => Number(t.cluster_id) === Number(activeDrill.cluster_id) && Number(t.sub_cluster_id) === Number(sc.sub_cluster_id)
-                  ),
-              }))
-            : (data.clusters || []).map((c, idx) => ({
-                  id: c.cluster_id,
-                  prefix: "C",
-                  label: c.vibe_label,
-                  share: c.weighted_share_pct,
-                  color: CLUSTER_COLORS[idx % CLUSTER_COLORS.length],
-                  pts: (data.tracks || []).filter((t) => Number(t.cluster_id) === Number(c.cluster_id)),
-              }));
-
-        displayGroups.forEach((grp) => {
-            if (grp.pts.length < 4) return;
-            const rawCoords = grp.pts.map((t) => ({
-                x: state.is3d ? t.x3 : t.x,
-                y: state.is3d ? t.y3 : t.y,
-                z: t.z || 0,
-            }));
-            const trimmed = trimOutliers(rawCoords, 1.35);
-            if (trimmed.length < 4) return;
-
-            if (state.is3d) {
-                traces.push({
-                    type: "mesh3d",
-                    x: trimmed.map((p) => p.x),
-                    y: trimmed.map((p) => p.y),
-                    z: trimmed.map((p) => p.z),
-                    alphahull: 0,
-                    color: grp.color,
-                    opacity: 0.08,
-                    flatshading: true,
-                    lighting: { ambient: 0.9, diffuse: 0.3, specular: 0.0 },
-                    hoverinfo: "skip",
-                    showlegend: false,
-                    meta: { layer: "cluster-cloud" },
-                    visible: showClouds,
-                });
+        // Instant 0ms swap: if this container already has the exact same view rendered in WebGL/DOM,
+        // skip Plotly.react completely and only restyle clouds/filters if they changed.
+        const useSeparateDrill = Boolean(document.getElementById("tasteMapDrillPlot")?.dataset?.role === "drill");
+        const renderedKey = isDrilled ? state.drillRenderedKey : state.overviewRenderedKey;
+        if (useSeparateDrill && cached && plotEl.data && renderedKey === cacheKey) {
+            state.mapTraceIndex = cached.traceIndex;
+            state.mapLegendClusterIds = cached.legendClusterIds;
+            const filterKey = `${q}|${minW}`;
+            if (hasFilter || cached.lastFilterKey !== "") {
+                applyTasteMapFilter();
+                cached.lastFilterKey = hasFilter ? filterKey : "";
             } else {
-                const hull = computeConvexHull2D(trimmed);
-                if (hull.length >= 4) {
+                document.getElementById("mapMatchCount").textContent = "";
+            }
+            const firstCloud = plotEl.data.find((tr) => tr?.meta?.layer === "cluster-cloud");
+            if (firstCloud && firstCloud.visible !== showClouds) {
+                updateTasteMapClouds();
+            }
+            return Promise.resolve();
+        }
+
+        if (!cached) {
+            const traces = [];
+            const centroids = [];
+            const legendClusterIds = {};
+            const traceIndex = [];
+
+            const displayGroups = isDrilled
+                ? activeDrill.subclusters.map((sc, idx) => ({
+                      id: sc.sub_cluster_id,
+                      prefix: "S",
+                      label: sc.vibe_label,
+                      share: sc.raw_percentage,
+                      color: CLUSTER_COLORS[idx % CLUSTER_COLORS.length],
+                      pts: (data.tracks || []).filter(
+                          (t) => Number(t.cluster_id) === Number(activeDrill.cluster_id) && Number(t.sub_cluster_id) === Number(sc.sub_cluster_id)
+                      ),
+                  }))
+                : (data.clusters || []).map((c, idx) => ({
+                      id: c.cluster_id,
+                      prefix: "C",
+                      label: c.vibe_label,
+                      share: c.weighted_share_pct,
+                      color: CLUSTER_COLORS[idx % CLUSTER_COLORS.length],
+                      pts: (data.tracks || []).filter((t) => Number(t.cluster_id) === Number(c.cluster_id)),
+                  }));
+
+            displayGroups.forEach((grp) => {
+                if (grp.pts.length < 4) return;
+                const rawCoords = grp.pts.map((t) => ({
+                    x: state.is3d ? t.x3 : t.x,
+                    y: state.is3d ? t.y3 : t.y,
+                    z: t.z || 0,
+                }));
+                const trimmed = trimOutliers(rawCoords, 1.35);
+                if (trimmed.length < 4) return;
+
+                if (state.is3d) {
+                    const hullPts = sampleHullPoints3D(trimmed, 28);
                     traces.push({
-                        type: "scatter",
-                        mode: "lines",
-                        x: hull.map((p) => p.x),
-                        y: hull.map((p) => p.y),
-                        fill: "toself",
-                        fillcolor: hexToRgba(grp.color, 0.06),
-                        line: { color: hexToRgba(grp.color, 0.22), width: 1 },
+                        type: "mesh3d",
+                        x: hullPts.map((p) => p.x),
+                        y: hullPts.map((p) => p.y),
+                        z: hullPts.map((p) => p.z),
+                        alphahull: 0,
+                        color: grp.color,
+                        opacity: 0.08,
+                        flatshading: true,
+                        lighting: { ambient: 0.9, diffuse: 0.3, specular: 0.0 },
                         hoverinfo: "skip",
                         showlegend: false,
                         meta: { layer: "cluster-cloud" },
                         visible: showClouds,
                     });
+                } else {
+                    const hull = computeConvexHull2D(trimmed);
+                    if (hull.length >= 4) {
+                        traces.push({
+                            type: "scatter",
+                            mode: "lines",
+                            x: hull.map((p) => p.x),
+                            y: hull.map((p) => p.y),
+                            fill: "toself",
+                            fillcolor: hexToRgba(grp.color, 0.06),
+                            line: { color: hexToRgba(grp.color, 0.22), width: 1 },
+                            hoverinfo: "skip",
+                            showlegend: false,
+                            meta: { layer: "cluster-cloud" },
+                            visible: showClouds,
+                        });
+                    }
                 }
-            }
-        });
+            });
 
-        const appendTrackGroupTrace = (pts, color, legendName, clusterLabel, options = {}) => {
-            const { collectCentroid = false, clusterId = -1, prefix = "C", sizeScale = 1.0, fixedOp = null } = options;
-            const x = [];
-            const y = [];
-            const z = [];
-            const colorsArr = [];
-            const sizes = [];
-            const ops = [];
-            const lineColors = [];
-            const lineWidths = [];
-            const texts = [];
-            const meta = [];
-            const indexedItems = [];
+            const appendTrackGroupTrace = (pts, color, legendName, clusterLabel, options = {}) => {
+                const { collectCentroid = false, clusterId = -1, prefix = "C", sizeScale = 1.0, fixedOp = null } = options;
+                const x = [];
+                const y = [];
+                const z = [];
+                const colorsArr = [];
+                const sizes = [];
+                const ops = [];
+                const lineColors = [];
+                const lineWidths = [];
+                const texts = [];
+                const meta = [];
+                const indexedItems = [];
 
-            pts.forEach((t) => {
-                const raw2d = Math.min(20, Math.max(5, Math.round(4 + Math.pow(t.recency_weight || 1, 0.6) * 2)));
-                const baseSize2d = Math.max(4, Math.round(raw2d * sizeScale));
-                const baseSize3d = Math.max(2.5, Math.round(baseSize2d * 0.55));
-                const baseOp = fixedOp != null ? fixedOp : Math.min(1.0, Math.max(0.35, 0.35 + (t.recency_weight || 1) / 30.0));
-                const item = {
-                    searchKey: `${t.name} ${t.artist} ${t.genres}`.toLowerCase(),
-                    weight: Number(t.recency_weight || 0),
-                    baseSize2d,
-                    baseSize3d,
-                    baseOp,
-                };
-                indexedItems.push(item);
+                pts.forEach((t) => {
+                    const raw2d = Math.min(20, Math.max(5, Math.round(4 + Math.pow(t.recency_weight || 1, 0.6) * 2)));
+                    const baseSize2d = Math.max(4, Math.round(raw2d * sizeScale));
+                    const baseSize3d = Math.max(2.5, Math.round(baseSize2d * 0.55));
+                    const baseOp = fixedOp != null ? fixedOp : Math.min(1.0, Math.max(0.35, 0.35 + (t.recency_weight || 1) / 30.0));
+                    const item = {
+                        searchKey: `${t.name} ${t.artist} ${t.genres}`.toLowerCase(),
+                        weight: Number(t.recency_weight || 0),
+                        baseSize2d,
+                        baseSize3d,
+                        baseOp,
+                    };
+                    indexedItems.push(item);
 
-                const st = computeMapMarkerStyle(item, color, q, minW, state.is3d);
-                if (hasFilter && st.active) matches += 1;
+                    const st = computeMapMarkerStyle(item, color, "", 0, state.is3d);
+                    x.push(state.is3d ? t.x3 : t.x);
+                    y.push(state.is3d ? t.y3 : t.y);
+                    z.push(t.z);
+                    colorsArr.push(st.color);
+                    sizes.push(st.size);
+                    ops.push(st.opacity);
+                    lineColors.push(st.lineColor);
+                    lineWidths.push(st.lineWidth);
+                    meta.push({
+                        url: t.spotify_url || "",
+                        yt_url: t.youtube_url || "",
+                        id: t.id || "",
+                        vid: t.video_id || "",
+                        provider: t.provider || "spotify",
+                        name: t.name || "",
+                        artist: t.artist || "",
+                        label: `${t.name} — ${t.artist}`,
+                    });
 
-                x.push(state.is3d ? t.x3 : t.x);
-                y.push(state.is3d ? t.y3 : t.y);
-                z.push(t.z);
-                colorsArr.push(st.color);
-                sizes.push(st.size);
-                ops.push(st.opacity);
-                lineColors.push(st.lineColor);
-                lineWidths.push(st.lineWidth);
-                meta.push({
-                    url: t.spotify_url || "",
-                    yt_url: t.youtube_url || "",
-                    id: t.id || "",
-                    vid: t.video_id || "",
-                    provider: t.provider || "spotify",
-                    name: t.name || "",
-                    artist: t.artist || "",
-                    label: `${t.name} — ${t.artist}`,
+                    const afLine = t.bpm != null ? `<br>Audio: ${t.bpm} BPM | Energy ${t.energy} | Valence ${t.valence}` : "";
+                    texts.push(
+                        `<b>${plotlyText(t.name)}</b><br>${plotlyText(t.artist)}` +
+                        `<br>Cluster: ${plotlyText(clusterLabel)}` +
+                        `<br>Genres: ${plotlyText(t.genres || "None")}` +
+                        afLine +
+                        `<br>Weight: ${t.recency_weight}` +
+                        (t.id ? "<br>Click to preview or open track" : "")
+                    );
                 });
 
-                const afLine = t.bpm != null ? `<br>Audio: ${t.bpm} BPM | Energy ${t.energy} | Valence ${t.valence}` : "";
-                texts.push(
-                    `<b>${plotlyText(t.name)}</b><br>${plotlyText(t.artist)}` +
-                    `<br>Cluster: ${plotlyText(clusterLabel)}` +
-                    `<br>Genres: ${plotlyText(t.genres || "None")}` +
-                    afLine +
-                    `<br>Weight: ${t.recency_weight}` +
-                    (t.id ? "<br>Click to preview or open track" : "")
+                if (collectCentroid && pts.length) {
+                    centroids.push({
+                        cx: x.reduce((acc, v) => acc + v, 0) / x.length,
+                        cy: y.reduce((acc, v) => acc + v, 0) / y.length,
+                        cz: z.reduce((acc, v) => acc + v, 0) / z.length,
+                        color,
+                        label: `${prefix}${clusterId} · ${clusterLabel}`,
+                    });
+                }
+
+                traceIndex.push({
+                    traceIdx: traces.length,
+                    color,
+                    items: indexedItems,
+                });
+
+                const trace = {
+                    x, y,
+                    mode: "markers",
+                    type: state.is3d ? "scatter3d" : "scattergl",
+                    name: legendName,
+                    text: texts,
+                    customdata: meta,
+                    hoverinfo: "text",
+                    marker: { size: sizes, color: colorsArr, opacity: ops, line: { color: lineColors, width: lineWidths } },
+                };
+                if (state.is3d) trace.z = z;
+                traces.push(trace);
+            };
+
+            displayGroups.forEach((grp) => {
+                if (!isDrilled) {
+                    legendClusterIds[traces.length] = grp.id;
+                }
+                appendTrackGroupTrace(
+                    grp.pts,
+                    grp.color,
+                    `${grp.prefix}${grp.id}: ${grp.label} (${grp.share}%)`,
+                    grp.label,
+                    { collectCentroid: true, clusterId: grp.id, prefix: grp.prefix }
                 );
             });
 
-            if (collectCentroid && pts.length) {
-                centroids.push({
-                    cx: x.reduce((acc, v) => acc + v, 0) / x.length,
-                    cy: y.reduce((acc, v) => acc + v, 0) / y.length,
-                    cz: z.reduce((acc, v) => acc + v, 0) / z.length,
-                    color,
-                    label: `${prefix}${clusterId} · ${clusterLabel}`,
-                });
+            const unclusteredPts = isDrilled ? [] : (data.tracks || []).filter((t) => t.cluster_id === -1);
+            if (unclusteredPts.length) {
+                appendTrackGroupTrace(
+                    unclusteredPts,
+                    "#7a7d88",
+                    `Unclustered / Eclectic (${unclusteredPts.length})`,
+                    "Unclustered / Eclectic",
+                    { collectCentroid: false, sizeScale: 0.78, fixedOp: 0.42 }
+                );
             }
 
-            state.mapTraceIndex.push({
-                traceIdx: traces.length,
-                color,
-                items: indexedItems,
-            });
-
-            const trace = {
-                x, y,
-                mode: "markers",
-                type: state.is3d ? "scatter3d" : "scatter",
-                name: legendName,
-                text: texts,
-                customdata: meta,
-                hoverinfo: "text",
-                marker: { size: sizes, color: colorsArr, opacity: ops, line: { color: lineColors, width: lineWidths } },
-            };
-            if (state.is3d) trace.z = z;
-            traces.push(trace);
-        };
-
-        displayGroups.forEach((grp) => {
-            if (!isDrilled) {
-                legendClusterIds[traces.length] = grp.id;
-            }
-            appendTrackGroupTrace(
-                grp.pts,
-                grp.color,
-                `${grp.prefix}${grp.id}: ${grp.label} (${grp.share}%)`,
-                grp.label,
-                { collectCentroid: true, clusterId: grp.id, prefix: grp.prefix }
-            );
-        });
-
-        const unclusteredPts = isDrilled ? [] : (data.tracks || []).filter((t) => t.cluster_id === -1);
-        if (unclusteredPts.length) {
-            appendTrackGroupTrace(
-                unclusteredPts,
-                "#7a7d88",
-                `Unclustered / Eclectic (${unclusteredPts.length})`,
-                "Unclustered / Eclectic",
-                { collectCentroid: false, sizeScale: 0.78, fixedOp: 0.42 }
-            );
-        }
-
-        if (showCentroids && centroids.length) {
-            const centroidTrace = {
-                x: centroids.map((ct) => ct.cx),
-                y: centroids.map((ct) => ct.cy),
-                mode: "markers+text",
-                type: state.is3d ? "scatter3d" : "scatter",
-                name: "Cluster Centers",
-                showlegend: false,
-                hoverinfo: "skip",
-                text: centroids.map((ct) => ct.label),
-                textposition: "top center",
-                textfont: {
-                    color: "#ededed",
-                    size: state.is3d ? 10 : 11,
-                    family: "'IBM Plex Sans', sans-serif",
-                },
-                marker: {
-                    size: state.is3d ? 5 : 7,
-                    symbol: "diamond",
-                    color: centroids.map((ct) => ct.color),
-                    line: { color: "#ededed", width: 1 },
-                },
-            };
-            if (state.is3d) centroidTrace.z = centroids.map((ct) => ct.cz);
-            traces.push(centroidTrace);
-        }
-
-        const eraTraj = Array.isArray(data.era_trajectory) ? data.era_trajectory : [];
-        if (showEraPath && eraTraj.length) {
-            if (state.is3d) {
-                traces.push({
-                    x: eraTraj.map((e) => e.x3 ?? e.x),
-                    y: eraTraj.map((e) => e.y3 ?? e.y),
-                    z: eraTraj.map((e) => e.z ?? 0),
-                    mode: "lines+markers+text",
-                    type: "scatter3d",
-                    name: "Era Evolution Path",
-                    text: eraTraj.map((e) => String(e.year)),
-                    hoverinfo: "text",
-                    hovertext: eraTraj.map((e) => `<b>${escapeHtml(e.year)}</b>: ${escapeHtml(e.plays)} plays`),
-                    line: { color: "#e5a04b", width: 4 },
-                    marker: { size: 6, color: "#e5a04b" },
-                });
-            } else {
-                traces.push({
-                    x: eraTraj.map((e) => e.x),
-                    y: eraTraj.map((e) => e.y),
-                    mode: "lines+markers+text",
-                    type: "scatter",
-                    name: "Era Evolution Path",
-                    text: eraTraj.map((e) => String(e.year)),
+            if (showCentroids && centroids.length) {
+                const centroidTrace = {
+                    x: centroids.map((ct) => ct.cx),
+                    y: centroids.map((ct) => ct.cy),
+                    mode: "markers+text",
+                    type: state.is3d ? "scatter3d" : "scatter",
+                    name: "Cluster Centers",
+                    showlegend: false,
+                    hoverinfo: "skip",
+                    text: centroids.map((ct) => ct.label),
                     textposition: "top center",
-                    hoverinfo: "text",
-                    hovertext: eraTraj.map((e) => `<b>${escapeHtml(e.year)}</b>: ${escapeHtml(e.plays)} plays (${escapeHtml(e.unique_tracks)} tracks)`),
-                    line: { color: "#e5a04b", width: 3, dash: "dot" },
-                    marker: { size: 10, color: "#e5a04b", symbol: "circle-open", line: { width: 2, color: "#ededed" } },
-                });
+                    textfont: {
+                        color: "#ededed",
+                        size: state.is3d ? 10 : 11,
+                        family: "'IBM Plex Sans', sans-serif",
+                    },
+                    marker: {
+                        size: state.is3d ? 5 : 7,
+                        symbol: "diamond",
+                        color: centroids.map((ct) => ct.color),
+                        line: { color: "#ededed", width: 1 },
+                    },
+                };
+                if (state.is3d) centroidTrace.z = centroids.map((ct) => ct.cz);
+                traces.push(centroidTrace);
             }
+
+            const eraTraj = Array.isArray(data.era_trajectory) ? data.era_trajectory : [];
+            if (showEraPath && eraTraj.length) {
+                if (state.is3d) {
+                    traces.push({
+                        x: eraTraj.map((e) => e.x3 ?? e.x),
+                        y: eraTraj.map((e) => e.y3 ?? e.y),
+                        z: eraTraj.map((e) => e.z ?? 0),
+                        mode: "lines+markers+text",
+                        type: "scatter3d",
+                        name: "Era Evolution Path",
+                        text: eraTraj.map((e) => String(e.year)),
+                        hoverinfo: "text",
+                        hovertext: eraTraj.map((e) => `<b>${escapeHtml(e.year)}</b>: ${escapeHtml(e.plays)} plays`),
+                        line: { color: "#e5a04b", width: 4 },
+                        marker: { size: 6, color: "#e5a04b" },
+                    });
+                } else {
+                    traces.push({
+                        x: eraTraj.map((e) => e.x),
+                        y: eraTraj.map((e) => e.y),
+                        mode: "lines+markers+text",
+                        type: "scatter",
+                        name: "Era Evolution Path",
+                        text: eraTraj.map((e) => String(e.year)),
+                        textposition: "top center",
+                        hoverinfo: "text",
+                        hovertext: eraTraj.map((e) => `<b>${escapeHtml(e.year)}</b>: ${escapeHtml(e.plays)} plays (${escapeHtml(e.unique_tracks)} tracks)`),
+                        line: { color: "#e5a04b", width: 3, dash: "dot" },
+                        marker: { size: 10, color: "#e5a04b", symbol: "circle-open", line: { width: 2, color: "#ededed" } },
+                    });
+                }
+            }
+
+            const projUpper = (data.projection_method || "pca").toUpperCase();
+            const ev2 = data.explained_variance_2d || [0, 0];
+            const ev3 = data.explained_variance_3d || [0, 0, 0];
+            const axisLabel = (idx, evArr) => {
+                if (projUpper === "PCA" && evArr[idx] > 0) {
+                    return `PC${idx + 1} (${(evArr[idx] * 100).toFixed(1)}%)`;
+                }
+                return `${projUpper} ${idx + 1}`;
+            };
+            const uiRev = isDrilled ? `taste-map-drill-${activeDrill.cluster_id}` : "taste-map-v1";
+            let xRange = undefined;
+            let yRange = undefined;
+            if (isDrilled && !state.is3d) {
+                const drillPts = displayGroups.flatMap((g) => g.pts);
+                if (drillPts.length) {
+                    const xs = drillPts.map((t) => t.x);
+                    const ys = drillPts.map((t) => t.y);
+                    const minX = Math.min(...xs);
+                    const maxX = Math.max(...xs);
+                    const minY = Math.min(...ys);
+                    const maxY = Math.max(...ys);
+                    const padX = Math.max(0.05, (maxX - minX) * 0.14);
+                    const padY = Math.max(0.05, (maxY - minY) * 0.14);
+                    xRange = [minX - padX, maxX + padX];
+                    yRange = [minY - padY, maxY + padY];
+                }
+            }
+            const layout = state.is3d
+                ? {
+                      uirevision: uiRev,
+                      paper_bgcolor: "#19191b",
+                      font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
+                      scene: {
+                          bgcolor: "#141415",
+                          xaxis: { title: axisLabel(0, ev3), gridcolor: "rgba(237,237,237,0.08)" },
+                          yaxis: { title: axisLabel(1, ev3), gridcolor: "rgba(237,237,237,0.08)" },
+                          zaxis: { title: axisLabel(2, ev3), gridcolor: "rgba(237,237,237,0.08)" },
+                      },
+                      margin: { l: 10, r: 10, t: 20, b: 30 },
+                      legend: { orientation: "h", y: -0.05 },
+                  }
+                : {
+                      uirevision: uiRev,
+                      paper_bgcolor: "#19191b",
+                      plot_bgcolor: "#141415",
+                      font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
+                      xaxis: { title: axisLabel(0, ev2), gridcolor: "rgba(237,237,237,0.08)", ...(xRange ? { range: xRange } : {}) },
+                      yaxis: { title: axisLabel(1, ev2), gridcolor: "rgba(237,237,237,0.08)", ...(yRange ? { range: yRange } : {}) },
+                      margin: { l: 50, r: 20, t: 20, b: 70 },
+                      legend: { orientation: "h", y: -0.18 },
+                  };
+
+            cached = { traces, layout, traceIndex, legendClusterIds, lastFilterKey: "" };
+            state.mapViewCache.set(cacheKey, cached);
         }
 
+        // Sync cloud visibility and active search/weight filter onto cached traces
+        cached.traces.forEach((tr) => {
+            if (tr?.meta?.layer === "cluster-cloud") tr.visible = showClouds;
+        });
+        const filterKey = `${q}|${minW}`;
+        if (hasFilter || cached.lastFilterKey !== "") {
+            cached.traceIndex.forEach((entry) => {
+                const tr = cached.traces[entry.traceIdx];
+                if (!tr?.marker) return;
+                const colorsArr = [];
+                const sizes = [];
+                const ops = [];
+                const lineColors = [];
+                const lineWidths = [];
+                entry.items.forEach((item) => {
+                    const st = computeMapMarkerStyle(item, entry.color, q, minW, state.is3d);
+                    if (hasFilter && st.active) matches += 1;
+                    colorsArr.push(st.color);
+                    sizes.push(st.size);
+                    ops.push(st.opacity);
+                    lineColors.push(st.lineColor);
+                    lineWidths.push(st.lineWidth);
+                });
+                tr.marker.color = colorsArr;
+                tr.marker.size = sizes;
+                tr.marker.opacity = ops;
+                tr.marker.line = { color: lineColors, width: lineWidths };
+            });
+            cached.lastFilterKey = hasFilter ? filterKey : "";
+        }
+
+        state.mapTraceIndex = cached.traceIndex;
+        state.mapLegendClusterIds = cached.legendClusterIds;
         document.getElementById("mapMatchCount").textContent = hasFilter ? `${matches} matching tracks` : "";
 
-        const projUpper = (data.projection_method || "pca").toUpperCase();
-        const ev2 = data.explained_variance_2d || [0, 0];
-        const ev3 = data.explained_variance_3d || [0, 0, 0];
-        const axisLabel = (idx, evArr) => {
-            if (projUpper === "PCA" && evArr[idx] > 0) {
-                return `PC${idx + 1} (${(evArr[idx] * 100).toFixed(1)}%)`;
-            }
-            return `${projUpper} ${idx + 1}`;
-        };
-        const uiRev = isDrilled ? `taste-map-drill-${activeDrill.cluster_id}` : "taste-map-v1";
-        let xRange = undefined;
-        let yRange = undefined;
-        if (isDrilled && !state.is3d) {
-            const drillPts = displayGroups.flatMap((g) => g.pts);
-            if (drillPts.length) {
-                const xs = drillPts.map((t) => t.x);
-                const ys = drillPts.map((t) => t.y);
-                const minX = Math.min(...xs);
-                const maxX = Math.max(...xs);
-                const minY = Math.min(...ys);
-                const maxY = Math.max(...ys);
-                const padX = Math.max(0.05, (maxX - minX) * 0.14);
-                const padY = Math.max(0.05, (maxY - minY) * 0.14);
-                xRange = [minX - padX, maxX + padX];
-                yRange = [minY - padY, maxY + padY];
-            }
-        }
-        const layout = state.is3d
-            ? {
-                  uirevision: uiRev,
-                  paper_bgcolor: "#19191b",
-                  font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
-                  scene: {
-                      bgcolor: "#141415",
-                      xaxis: { title: axisLabel(0, ev3), gridcolor: "rgba(237,237,237,0.08)" },
-                      yaxis: { title: axisLabel(1, ev3), gridcolor: "rgba(237,237,237,0.08)" },
-                      zaxis: { title: axisLabel(2, ev3), gridcolor: "rgba(237,237,237,0.08)" },
-                  },
-                  margin: { l: 10, r: 10, t: 20, b: 30 },
-                  legend: { orientation: "h", y: -0.05 },
-              }
-            : {
-                  uirevision: uiRev,
-                  paper_bgcolor: "#19191b",
-                  plot_bgcolor: "#141415",
-                  font: { color: "#a1a1a6", family: "'IBM Plex Mono', monospace", size: 11 },
-                  xaxis: { title: axisLabel(0, ev2), gridcolor: "rgba(237,237,237,0.08)", ...(xRange ? { range: xRange } : {}) },
-                  yaxis: { title: axisLabel(1, ev2), gridcolor: "rgba(237,237,237,0.08)", ...(yRange ? { range: yRange } : {}) },
-                  margin: { l: 50, r: 20, t: 20, b: 70 },
-                  legend: { orientation: "h", y: -0.18 },
-              };
-
-        Promise.resolve(Plotly.newPlot(plotEl, traces, layout, { responsive: true })).then(() => {
+        const plotFn = typeof Plotly.react === "function" && plotEl.data ? Plotly.react : Plotly.newPlot;
+        const plotPromise = Promise.resolve(plotFn(plotEl, cached.traces, cached.layout, { responsive: true })).then(() => {
+            if (isDrilled) state.drillRenderedKey = cacheKey;
+            else state.overviewRenderedKey = cacheKey;
             if (state.is3d) disableMesh3dPicking(plotEl);
         });
-        if (typeof plotEl.removeAllListeners === "function") {
-            plotEl.removeAllListeners("plotly_click");
-            plotEl.removeAllListeners("plotly_legendclick");
+        if (!plotEl._tasteMapListenersBound) {
+            plotEl._tasteMapListenersBound = true;
+            plotEl.on("plotly_legendclick", (evt) => {
+                if (state.drillClusterId === null && evt && typeof evt.curveNumber === "number" && state.mapLegendClusterIds[evt.curveNumber] !== undefined) {
+                    enterClusterDrill(state.mapLegendClusterIds[evt.curveNumber]);
+                    return false;
+                }
+                return true;
+            });
+            plotEl.on("plotly_click", (evt) => {
+                const cd = evt?.points?.[0]?.customdata;
+                if (!cd || typeof cd !== "object") return;
+                const action = document.getElementById("mapClickAction").value;
+                if (action === "preview" && (cd.id || cd.vid)) {
+                    openPreviewTrack({ id: cd.id, video_id: cd.vid, provider: cd.provider, name: cd.name || cd.label, artist: cd.artist || "" }, cd.label);
+                } else {
+                    const targetUrl = safeHttpUrl(cd.url || cd.yt_url);
+                    if (targetUrl) window.open(targetUrl, "_blank", "noopener,noreferrer");
+                }
+            });
         }
-        plotEl.on("plotly_legendclick", (evt) => {
-            if (!isDrilled && evt && typeof evt.curveNumber === "number" && legendClusterIds[evt.curveNumber] !== undefined) {
-                enterClusterDrill(legendClusterIds[evt.curveNumber]);
-                return false;
-            }
-            return true;
-        });
-        plotEl.on("plotly_click", (evt) => {
-            const cd = evt?.points?.[0]?.customdata;
-            if (!cd || typeof cd !== "object") return;
-            const action = document.getElementById("mapClickAction").value;
-            if (action === "preview" && (cd.id || cd.vid)) {
-                openPreviewTrack({ id: cd.id, video_id: cd.vid, provider: cd.provider, name: cd.name || cd.label, artist: cd.artist || "" }, cd.label);
-            } else {
-                const targetUrl = safeHttpUrl(cd.url || cd.yt_url);
-                if (targetUrl) window.open(targetUrl, "_blank", "noopener,noreferrer");
-            }
-        });
+        return plotPromise;
     }
 
     function renderClusterRadar(clusters) {
@@ -1442,7 +1595,8 @@
                 opacity: 0.7,
             };
         });
-        Plotly.newPlot(
+        const radarFn = typeof Plotly.react === "function" && el.data ? Plotly.react : Plotly.newPlot;
+        radarFn(
             el,
             traces,
             {
@@ -2972,7 +3126,10 @@
         document.getElementById("btnToggle3D").addEventListener("click", () => {
             state.is3d = !state.is3d;
             document.getElementById("btnToggle3D").textContent = state.is3d ? "Switch to 2D" : "Switch to 3D";
-            renderTasteMapPlot();
+            runWithMapLoader(
+                state.is3d ? "Switching to 3D view…" : "Switching to 2D view…",
+                () => renderTasteMapPlot()
+            );
         });
         document.getElementById("btnResetMapFilter").addEventListener("click", () => {
             document.getElementById("mapSearchBox").value = "";

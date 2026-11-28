@@ -484,7 +484,14 @@
                             <span id="mapDrillTitle" class="map-drill-title"></span>
                             <span id="mapDrillMeta" class="muted"></span>
                         </div>
-                        <div id="tasteMapPlot" class="plot-box"></div>
+                        <div class="plot-stage">
+                            <div id="mapLoadingOverlay" class="map-loading-overlay" style="display:none;" aria-live="polite">
+                                <div class="map-spinner"></div>
+                                <span id="mapLoadingText">Rendering map…</span>
+                            </div>
+                            <div id="tasteMapPlot" class="plot-box"></div>
+                            <div id="tasteMapDrillPlot" class="plot-box plot-box-drill" data-role="drill"></div>
+                        </div>
                     </div>
 
                     <div class="two-col mt-16">

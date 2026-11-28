@@ -902,7 +902,59 @@ input[type="file"]::file-selector-button:hover {
     max-width: 280px;
 }
 
-.plot-box { width: 100%; height: 560px; }
+.plot-stage {
+    position: relative;
+    width: 100%;
+    height: 560px;
+}
+.plot-box {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 560px;
+}
+.plot-box.plot-hidden {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
+.plot-box-drill {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
+.plot-box-drill.plot-active {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+}
+.map-loading-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: rgba(20, 20, 21, 0.78);
+    backdrop-filter: blur(2px);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    border-radius: var(--radius-md);
+}
+.map-spinner {
+    width: 28px;
+    height: 28px;
+    border: 2.5px solid rgba(237, 237, 237, 0.18);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: map-spin 0.7s linear infinite;
+}
+@keyframes map-spin {
+    to { transform: rotate(360deg); }
+}
 .radar-box { width: 100%; height: 340px; }
 .chart-box { width: 100%; height: 320px; }
 

@@ -723,7 +723,11 @@ def fit_hierarchical_macro_clusters(
             if float(sims[i, best_j]) >= float(attach_threshold):
                 labels[i] = best_j
 
-    # 2-pass light centroid refinement: snap acoustically mislabeled tracks cleanly as continents settle
+    # 2-pass light centroid refinement:
+    # - Tracks with a verified kept macro_genre stay in their macro unless genuinely mislabeled
+    #   (weak similarity < 0.25 to own macro AND another macro beats it by >= +0.22).
+    # - Rare/untagged tracks folded in acoustically refine freely with refine_margin.
+    has_verified_macro = init_labels >= 0
     for _ in range(2):
         c_mat2 = _compute_centered_centroids(labels, len(kept_macros))
         raw_sims2 = mat_c @ c_mat2.T
@@ -736,12 +740,20 @@ def fit_hierarchical_macro_clusters(
                 best_j = int(np.argmax(sims2[i]))
                 cur_s = float(raw_sims2[i, labels[i]])
                 best_s = float(sims2[i, best_j])
-                if best_j != labels[i] and best_s >= cur_s + float(refine_margin):
-                    labels[i] = best_j
-                    changed += 1
-                elif cur_s < float(cohesion_floor):
-                    labels[i] = -1
-                    changed += 1
+                if has_verified_macro[i]:
+                    if best_j != labels[i] and cur_s < 0.25 and best_s >= cur_s + 0.22:
+                        labels[i] = best_j
+                        changed += 1
+                    elif cur_s < 0.12:
+                        labels[i] = -1
+                        changed += 1
+                else:
+                    if best_j != labels[i] and best_s >= cur_s + float(refine_margin):
+                        labels[i] = best_j
+                        changed += 1
+                    elif cur_s < float(cohesion_floor):
+                        labels[i] = -1
+                        changed += 1
         if changed == 0:
             break
 

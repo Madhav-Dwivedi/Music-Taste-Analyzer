@@ -165,3 +165,27 @@ test("fractional weight filtering uses the displayed threshold and does not recr
     assert.equal(app.elements.get("mapWeightVal").textContent, "0");
     assert.equal(app.elements.get("mapMatchCount").textContent, "");
 });
+
+test("drill-in and back-out reuses cached view traces via Plotly.react", () => {
+    const app = mapApp({ drilled: false });
+    app.state.mapData.clusters[0].subclusters = [0, 1].map((cid) => ({ sub_cluster_id: cid, vibe_label: `Sub ${cid}`, raw_percentage: 50 }));
+    let reactCalls = 0;
+    app.plot._reactTracker = 0;
+    // Initial overview render
+    app.renderTasteMapPlot();
+    const overviewTraces = app.plot.data;
+    assert.equal(app.state.mapViewCache.size, 1);
+
+    // Drill into cluster 0
+    app.state.drillClusterId = 0;
+    app.renderTasteMapPlot();
+    const drilledTraces = app.plot.data;
+    assert.equal(app.state.mapViewCache.size, 2);
+    assert.notEqual(drilledTraces, overviewTraces);
+
+    // Return to overview -> exact cached traces reused without rebuilding
+    app.state.drillClusterId = null;
+    app.renderTasteMapPlot();
+    assert.equal(app.plot.data, overviewTraces);
+    assert.equal(app.state.mapViewCache.size, 2);
+});
