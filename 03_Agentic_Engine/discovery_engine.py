@@ -18,6 +18,24 @@ for p in (ROOT_DIR, STAGE1_DIR, STAGE2_DIR):
 
 import config
 import ytmusic_client
+from agent_dj import (
+    DJChatSession,
+    GenerationCancelledError,
+    check_cancelled,
+    resolve_critic_budget,
+    run_bounded_critic_step,
+    summarize_candidate_pool_for_critic,
+)
+from audio_scorer import (
+    build_clap_candidate_text,
+    build_stratified_curator_shortlist,
+    compute_scored_mmr,
+    compute_subcluster_centroid,
+    is_real_clap_model,
+    load_raw_clap_audio_cache,
+    score_local_library_candidates,
+    verify_and_rerank_discovery_candidates,
+)
 from llm_parser import get_llm, parse_prompt, parse_refinement_instruction, vibe_check_playlist
 from stage1_extractor import authenticate_spotify
 from utils import (
@@ -609,12 +627,29 @@ class WarmDiscoverySession:
 
         self.last_candidates = []
         self.last_playlist = load_json_safe(LAST_PL_PATH)
+        self.chat_session = DJChatSession()
+        if isinstance(self.last_playlist, dict):
+            self.chat_session.load_from_payload(self.last_playlist)
 
     def _log(self, msg, log_cb=None):
         print(msg)
         if log_cb is not None:
             try:
                 log_cb(msg)
+            except Exception:
+                pass
+
+    def _emit_progress(self, progress_cb, step, label, pct, detail=""):
+        if progress_cb is not None:
+            try:
+                progress_cb(
+                    {
+                        "step": int(step),
+                        "label": str(label),
+                        "pct": int(max(0, min(100, pct))),
+                        "detail": str(detail or ""),
+                    }
+                )
             except Exception:
                 pass
 
@@ -670,6 +705,16 @@ class WarmDiscoverySession:
                         "vibe_label": c.get("vibe_label"),
                         "track_count": c.get("track_count"),
                         "weighted_share_pct": c.get("weighted_share_pct"),
+                        "subclusters": [
+                            {
+                                "sub_cluster_id": sc.get("sub_cluster_id"),
+                                "vibe_label": sc.get("vibe_label"),
+                                "track_count": sc.get("track_count"),
+                                "raw_percentage": sc.get("raw_percentage"),
+                            }
+                            for sc in (c.get("subclusters") or [])
+                            if isinstance(sc, dict)
+                        ],
                     }
                     for c in (summary.get("clusters") or [])
                 ]
@@ -681,6 +726,16 @@ class WarmDiscoverySession:
                         "vibe_label": c.get("vibe_label"),
                         "track_count": c.get("track_count"),
                         "weighted_share_pct": c.get("weighted_share_pct"),
+                        "subclusters": [
+                            {
+                                "sub_cluster_id": sc.get("sub_cluster_id"),
+                                "vibe_label": sc.get("vibe_label"),
+                                "track_count": sc.get("track_count"),
+                                "raw_percentage": sc.get("raw_percentage"),
+                            }
+                            for sc in (c.get("subclusters") or [])
+                            if isinstance(sc, dict)
+                        ],
                     }
                     for c in (self.clusters or [])
                 ]
@@ -699,6 +754,13 @@ class WarmDiscoverySession:
                 if llm_backend in ("ollama", "openai_local"):
                     prefix = "Ollama" if llm_backend == "ollama" else "Local API"
                     llm_label = f"{prefix}: {prefs.get('ollama_model')}"
+                elif llm_backend in ("gemini", "openai", "anthropic", "openrouter"):
+                    from llm_providers import resolve_cloud_model
+
+                    p_cfg = (getattr(config, "CLOUD_LLM_PROVIDERS", {}) or {}).get(llm_backend) or {}
+                    cm = resolve_cloud_model(llm_backend, prefs.get("cloud_model"))
+                    llm_label = f"{p_cfg.get('label', llm_backend.title())}: {cm}"
+                    llm_device = "Cloud API"
                 elif llm_model_key == "auto":
                     llm_label = "Auto (Hardware Tier)"
                 else:
@@ -713,9 +775,11 @@ class WarmDiscoverySession:
                 "llm_backend": llm_backend,
                 "llm_model_key": llm_model_key,
                 "llm_device": llm_device,
+                "critic_depth": prefs.get("critic_depth", "auto"),
                 "spotify_warm": self.sp is not None,
                 "ytmusic_warm": self.ytm is not None,
                 "active_provider": prefs.get("active_provider", "spotify"),
+                "embed_backend": get_vectors_backend(),
                 "vectors_loaded": self.local_embeddings is not None,
                 "vectors_ready": vectors_ready,
                 "track_count": track_count,
@@ -744,12 +808,14 @@ class WarmDiscoverySession:
             prefs.get("llm_device", "auto"),
             prefs.get("ollama_url", ""),
             prefs.get("ollama_model", ""),
+            prefs.get("cloud_model", ""),
         )
 
-    def _build_taste_context(self, selected_cluster=None, provider="spotify"):
+    def _build_taste_context(self, selected_cluster=None, selected_subcluster=None, provider="spotify"):
         """Build a concise Taste DNA summary for grounding Stage 3 LLM query planning & curation."""
         lines = [f"Platform: {provider}"]
         target_cid = selected_cluster.get("cluster_id") if isinstance(selected_cluster, dict) else None
+        target_sid = selected_subcluster.get("sub_cluster_id") if isinstance(selected_subcluster, dict) else None
 
         if isinstance(selected_cluster, dict):
             top_g = ", ".join((selected_cluster.get("top_genres") or [])[:4])
@@ -757,6 +823,12 @@ class WarmDiscoverySession:
                 f"Focused Cluster: C{selected_cluster.get('cluster_id')} {selected_cluster.get('vibe_label', '')}"
                 + (f" [{top_g}]" if top_g else "")
             )
+            if isinstance(selected_subcluster, dict):
+                sub_g = ", ".join((selected_subcluster.get("top_genres") or [])[:4])
+                lines.append(
+                    f"Focused Sub-Vibe: S{selected_subcluster.get('sub_cluster_id')} {selected_subcluster.get('vibe_label', '')}"
+                    + (f" [{sub_g}]" if sub_g else "")
+                )
         elif self.clusters:
             top_clusters = sorted(
                 self.clusters,
@@ -781,11 +853,25 @@ class WarmDiscoverySession:
                     continue
                 if target_cid is not None and info.get("cluster_id") != target_cid:
                     continue
+                if target_sid is not None and info.get("sub_cluster_id") != target_sid:
+                    continue
                 rw = float(info.get("recency_weight") or 1.0)
                 prim_art = str(info.get("artists") or "").split(",")[0].strip()
                 if prim_art and prim_art.lower() != "unknown":
                     art_weights[prim_art] = art_weights.get(prim_art, 0.0) + rw
                 track_rows.append((rw, str(info.get("name") or ""), str(info.get("artists") or "")))
+
+            if target_sid is not None and not track_rows:
+                for info in meta.values():
+                    if not isinstance(info, dict) or info.get("excluded_from_taste"):
+                        continue
+                    if target_cid is not None and info.get("cluster_id") != target_cid:
+                        continue
+                    rw = float(info.get("recency_weight") or 1.0)
+                    prim_art = str(info.get("artists") or "").split(",")[0].strip()
+                    if prim_art and prim_art.lower() != "unknown":
+                        art_weights[prim_art] = art_weights.get(prim_art, 0.0) + rw
+                    track_rows.append((rw, str(info.get("name") or ""), str(info.get("artists") or "")))
 
             if target_cid is not None and not track_rows:
                 for info in meta.values():
@@ -812,7 +898,7 @@ class WarmDiscoverySession:
 
         with self._lock:
             target_backend = get_vectors_backend()
-            cur_is_clap = bool(getattr(self.embed_model, "is_clap", False)) if self.embed_model is not None else None
+            cur_is_clap = is_real_clap_model(self.embed_model) if self.embed_model is not None else None
             need_reload_embedder = (
                 self.embed_model is None
                 or self.embed_tokenizer is None
@@ -842,6 +928,7 @@ class WarmDiscoverySession:
                         "model_key": getattr(self.pipe, "model_key", cur_sig[1]),
                         "label": getattr(self.pipe, "label", str(cur_sig[1])),
                         "device": getattr(self.pipe, "device", cur_sig[2]),
+                        "capability_tier": getattr(self.pipe, "capability_tier", "standard"),
                     }
                 except Exception as e:
                     self._log(f"⚠️ Could not load Local LLM ({e}); continuing in Fast Vector Mode.", log_cb)
@@ -877,7 +964,7 @@ class WarmDiscoverySession:
             self.ytm = ytmusic_client.authenticate_ytmusic()
         return self.ytm
 
-    def _enrich_artist_genres_for_discovery(self, raw_tracks, sp, log_cb=None):
+    def _enrich_artist_genres_for_discovery(self, raw_tracks, sp, log_cb=None, max_lookups=25):
         artist_ids = []
         seen = set()
         for t in raw_tracks:
@@ -893,7 +980,7 @@ class WarmDiscoverySession:
         return enrich_artist_genres_2026(
             sp,
             artist_ids,
-            max_lookups=25,
+            max_lookups=max_lookups,
             max_empty_streak=3,
         )
 
@@ -941,6 +1028,11 @@ class WarmDiscoverySession:
         size=None,
         local_only=False,
         cluster_id=None,
+        sub_cluster_id=None,
+        known_tracks_ratio=None,
+        taste_weight=None,
+        verify_audio=None,
+        critic_depth=None,
         flow_mode="mmr",
         clean_only=False,
         deep_cuts=False,
@@ -950,6 +1042,8 @@ class WarmDiscoverySession:
         custom_centroid=None,
         seed_text=None,
         provider=None,
+        progress_cb=None,
+        cancel_event=None,
         log_cb=None,
     ):
         import numpy as np
@@ -961,10 +1055,14 @@ class WarmDiscoverySession:
         )
 
         with self._lock:
+            check_cancelled(cancel_event)
+            self._emit_progress(progress_cb, 1, "Planning", 8, "Loading vectors & planning intent")
             self._ensure_vectors_loaded(log_cb=log_cb)
 
             prompt_clean = str(prompt or "").strip()
             selected_cluster = None
+            selected_subcluster = None
+            subcluster_centroid = None
             if cluster_id is not None:
                 for c in self.clusters:
                     if c.get("cluster_id") == int(cluster_id):
@@ -972,7 +1070,23 @@ class WarmDiscoverySession:
                         break
                 if selected_cluster is None:
                     raise ValueError(f"Cluster C{cluster_id} was not found in Stage 2 summary.")
-                if not prompt_clean:
+                if sub_cluster_id is not None:
+                    for sc in selected_cluster.get("subclusters") or []:
+                        if sc.get("sub_cluster_id") == int(sub_cluster_id):
+                            selected_subcluster = sc
+                            break
+                    subcluster_centroid, _ = compute_subcluster_centroid(
+                        self.local_embeddings,
+                        self.local_ids,
+                        self.local_meta,
+                        cluster_id,
+                        sub_cluster_id,
+                    )
+                    if selected_subcluster is None and subcluster_centroid is None:
+                        raise ValueError(f"Sub-Vibe S{sub_cluster_id} was not found in Cluster C{cluster_id}.")
+                if not prompt_clean and selected_subcluster is not None:
+                    prompt_clean = f"Songs matching {selected_subcluster.get('vibe_label', f'Sub-Vibe S{sub_cluster_id}')}"
+                elif not prompt_clean:
                     prompt_clean = f"Songs matching {selected_cluster.get('vibe_label', f'Cluster {cluster_id}')}"
 
             if not prompt_clean:
@@ -992,9 +1106,15 @@ class WarmDiscoverySession:
             if eff_provider not in ("spotify", "ytmusic", "unified"):
                 eff_provider = "spotify"
 
-            taste_ctx = self._build_taste_context(selected_cluster=selected_cluster, provider=eff_provider)
+            taste_ctx = self._build_taste_context(
+                selected_cluster=selected_cluster,
+                selected_subcluster=selected_subcluster,
+                provider=eff_provider,
+            )
 
             self._log(f"\n[3/5] Parsing intent for: '{prompt_clean}'", log_cb)
+            check_cancelled(cancel_event)
+            self._emit_progress(progress_cb, 1, "Planning", 18, f"Analyzing '{prompt_clean[:48]}'")
             constraints = parse_prompt(
                 active_pipe,
                 prompt_clean,
@@ -1008,6 +1128,8 @@ class WarmDiscoverySession:
             if local_only:
                 constraints["local_only"] = True
                 constraints["known_tracks_ratio"] = 1.0
+            elif known_tracks_ratio is not None and not isinstance(known_tracks_ratio, bool):
+                constraints["known_tracks_ratio"] = round(max(0.0, min(1.0, float(known_tracks_ratio))), 3)
             if clean_only:
                 constraints["clean_only"] = True
             if deep_cuts:
@@ -1024,22 +1146,44 @@ class WarmDiscoverySession:
             liked_ids = get_liked_ids()
 
             prompt_vec = embed_texts([seed_text or prompt_clean], self.embed_tokenizer, self.embed_model)[0]
-            if custom_centroid is not None:
-                c_vec = np.array(custom_centroid, dtype=float)
-                blended = (0.35 * prompt_vec) + (0.65 * c_vec) if prompt_clean else c_vec
-            elif selected_cluster is not None and selected_cluster.get("centroid_vector"):
-                cluster_vec = np.array(selected_cluster["centroid_vector"], dtype=float)
-                blended = (0.45 * prompt_vec) + (0.55 * cluster_vec)
+            clap_active = (
+                is_real_clap_model(self.embed_model)
+                and self.local_embeddings is not None
+                and getattr(self.local_embeddings, "ndim", 0) == 2
+                and self.local_embeddings.shape[1] == 512
+            )
+
+            if taste_weight is not None and not isinstance(taste_weight, bool):
+                eff_taste_weight = max(0.0, min(1.0, float(taste_weight)))
+            elif custom_centroid is not None:
+                eff_taste_weight = 0.65
+            elif selected_cluster is not None:
+                eff_taste_weight = 0.55
             else:
-                blended = (0.70 * prompt_vec) + (0.30 * self.master_centroid)
+                eff_taste_weight = 0.30
+            eff_verify_audio = (not fast) if verify_audio is None else bool(verify_audio)
+
+            if custom_centroid is not None:
+                taste_centroid = np.array(custom_centroid, dtype=float)
+            elif subcluster_centroid is not None:
+                taste_centroid = np.array(subcluster_centroid, dtype=float)
+            elif selected_cluster is not None and selected_cluster.get("centroid_vector"):
+                taste_centroid = np.array(selected_cluster["centroid_vector"], dtype=float)
+            else:
+                taste_centroid = np.array(self.master_centroid, dtype=float)
 
             # Gently bias toward user's liked tracks when not targeting a fixed custom/cluster vector
             if liked_ids and custom_centroid is None and selected_cluster is None:
                 liked_indices = [i for i, tid in enumerate(self.local_ids) if tid in liked_ids]
                 if liked_indices:
                     liked_mean = np.mean(self.local_embeddings[liked_indices], axis=0)
-                    blended = blended + (0.08 * liked_mean)
+                    taste_centroid = taste_centroid + (0.08 * liked_mean)
 
+            tc_norm = float(np.linalg.norm(taste_centroid))
+            if tc_norm > 0:
+                taste_centroid = taste_centroid / tc_norm
+
+            blended = ((1.0 - eff_taste_weight) * prompt_vec) + (eff_taste_weight * taste_centroid)
             norm = float(np.linalg.norm(blended))
             target_vec = (blended / norm) if norm > 0 else prompt_vec
 
@@ -1077,6 +1221,8 @@ class WarmDiscoverySession:
             prefs = get_effective_preferences()
 
             self._log(f"\n[4/5] Reranking Local Database via MMR Diversity (target {n_known_fetch} candidates)...", log_cb)
+            check_cancelled(cancel_event)
+            self._emit_progress(progress_cb, 2, "Scoring Library", 34, "Scoring local tracks with taste & acoustic match")
 
             def filter_local_candidates(relaxed_af):
                 matched = []
@@ -1110,21 +1256,47 @@ class WarmDiscoverySession:
                     self._log("      ℹ️ Broadening local acoustic tolerance to recover enough matching tracks...", log_cb)
                     valid_local_indices = relaxed_local
 
-            final_playlist = []
+            local_candidates = []
             if valid_local_indices and n_known_fetch > 0:
                 sub_vecs = self.local_embeddings[valid_local_indices]
-                top_sub_idx = compute_mmr(
-                    target_vec,
-                    sub_vecs,
-                    top_k=min(n_known_fetch, len(valid_local_indices)),
-                    lambda_param=0.65,
-                )
+                raw_prompt_sims = None
+                if clap_active:
+                    raw_audio_cache = load_raw_clap_audio_cache(STAGE2_DIR)
+                    rel_scores, raw_prompt_sims = score_local_library_candidates(
+                        prompt_vec,
+                        taste_centroid,
+                        self.local_embeddings,
+                        self.local_ids,
+                        self.local_meta,
+                        valid_local_indices,
+                        raw_audio_cache=raw_audio_cache,
+                        is_clap=True,
+                        taste_weight=eff_taste_weight,
+                    )
+                    top_sub_idx = compute_scored_mmr(
+                        rel_scores,
+                        sub_vecs,
+                        top_k=min(n_known_fetch, len(valid_local_indices)),
+                        lambda_param=0.65,
+                    )
+                else:
+                    top_sub_idx = compute_mmr(
+                        target_vec,
+                        sub_vecs,
+                        top_k=min(n_known_fetch, len(valid_local_indices)),
+                        lambda_param=0.65,
+                    )
                 for sub_i in top_sub_idx:
                     tid = self.local_ids[valid_local_indices[sub_i]]
-                    final_playlist.append(self._format_local_track(tid))
+                    tr_fmt = self._format_local_track(tid)
+                    if raw_prompt_sims is not None and sub_i < len(raw_prompt_sims):
+                        tr_fmt["prompt_match"] = round(float(raw_prompt_sims[sub_i]), 3)
+                    local_candidates.append(tr_fmt)
 
+            discovered_tracks = []
+            verify_stats = None
+            critic_passes = 0
             if not eff_local_only and n_new_fetch > 0 and (sp is not None or ytm is not None):
-                discovered_tracks = []
                 discovered_ids = set()
                 discovered_fps = set()
                 past_queries = []
@@ -1134,7 +1306,7 @@ class WarmDiscoverySession:
                 spotify_rate_limited = threading.Event()
 
                 artist_freq = {}
-                for ft in final_playlist:
+                for ft in local_candidates:
                     pa = ft["artist"].split(",")[0].strip().lower()
                     artist_freq[pa] = artist_freq.get(pa, 0) + 1
 
@@ -1202,48 +1374,24 @@ class WarmDiscoverySession:
                             items.append(norm)
                     return items
 
-                while len(discovered_tracks) < n_new_fetch and agent_loops < max_agent_loops:
-                    if agent_loops == 0:
-                        queries = constraints.get("search_queries", [])
-                    else:
-                        tracks_needed = n_new_fetch - len(discovered_tracks)
-                        self._log(f"      -> Asking parser for deeper queries (Need {tracks_needed} more tracks)...", log_cb)
-                        new_constraints = parse_prompt(
-                            active_pipe,
-                            prompt_clean,
-                            past_queries=past_queries,
-                            avoid_artists=eff_avoid_artists,
-                            avoid_genres=eff_avoid_genres,
-                            taste_context=taste_ctx,
-                        )
-                        queries = new_constraints.get("search_queries", [])
-                        if not queries:
-                            break
-
-                    agent_loops += 1
-                    past_low = {pq.lower() for pq in past_queries}
-                    active_queries = [q for q in queries if q and q.lower() not in past_low]
-                    past_queries.extend(active_queries)
-                    if not active_queries:
-                        continue
-
+                def _discover_and_score_wave(active_queries, rec_picks=None, include_radio=False, needed=10):
                     raw_tracks = []
-                    if sp is not None and not spotify_rate_limited.is_set():
+                    if active_queries and sp is not None and not spotify_rate_limited.is_set():
                         self._log(f"      ⚡ Querying {len(active_queries)} Spotify search targets...", log_cb)
                         with ThreadPoolExecutor(max_workers=min(3, len(active_queries))) as executor:
                             futures = {executor.submit(fetch_spotify_tracks, q): q for q in active_queries}
                             for future in as_completed(futures):
                                 raw_tracks.extend(future.result())
 
-                    if ytm is not None:
+                    if active_queries and ytm is not None:
                         ytm_qs = active_queries[:3]
                         self._log(f"      ⚡ Querying {len(ytm_qs)} YouTube Music search targets...", log_cb)
                         for q in ytm_qs:
                             raw_tracks.extend(fetch_ytm_tracks(q))
 
-                        if agent_loops == 1 and not is_single_artist:
+                        if include_radio and not is_single_artist:
                             ytm_seeds = []
-                            for tr in final_playlist:
+                            for tr in local_candidates:
                                 svid = extract_ytm_video_id(tr.get("video_id") or tr.get("id"))
                                 if svid and svid not in ytm_seeds:
                                     ytm_seeds.append(svid)
@@ -1267,11 +1415,10 @@ class WarmDiscoverySession:
                             if added_watch:
                                 self._log(f"      ✨ Added {added_watch} YouTube Music Watch Radio recommendations.", log_cb)
 
-                    # Supplement first discovery wave with ReccoBeats /v1/track/recommendation (with negativeSeeds)
-                    if sp is not None and agent_loops == 1 and not is_single_artist:
+                    if include_radio and sp is not None and not is_single_artist:
                         seed_pool = [
                             tr.get("id")
-                            for tr in final_playlist
+                            for tr in local_candidates
                             if is_valid_spotify_id(tr.get("id"))
                         ]
                         for lid in liked_ids:
@@ -1316,16 +1463,15 @@ class WarmDiscoverySession:
                             except Exception as e:
                                 self._log(f"      ⚠️ ReccoBeats recommendation warning: {e}", log_cb)
 
-                    # Resolve direct AI Curator track suggestions (recommended_tracks) across active providers
-                    if agent_loops == 1 and not is_single_artist and (constraints.get("recommended_tracks") or []):
-                        rec_picks = [
-                            rt
-                            for rt in (constraints.get("recommended_tracks") or [])
-                            if isinstance(rt, dict) and rt.get("name") and rt.get("artist")
-                        ][:10]
+                    clean_picks = [
+                        rt
+                        for rt in (rec_picks or [])
+                        if isinstance(rt, dict) and rt.get("name") and rt.get("artist")
+                    ][:10]
+                    if clean_picks and not is_single_artist:
                         added_picks = 0
                         seen_pick_ids = {t.get("id") for t in raw_tracks if isinstance(t, dict) and t.get("id")}
-                        for pick in rec_picks:
+                        for pick in clean_picks:
                             p_name = str(pick["name"]).strip()
                             p_art = str(pick["artist"]).strip()
                             p_fp = get_track_fingerprint(p_name, p_art)
@@ -1379,7 +1525,7 @@ class WarmDiscoverySession:
                             self._log(f"      🧠 Resolved {added_picks} AI Curator Pick track(s).", log_cb)
 
                     if not raw_tracks:
-                        continue
+                        return []
 
                     # Deduplicate cross-provider hits in unified mode by (title, primary_artist)
                     deduped_raw = []
@@ -1407,12 +1553,7 @@ class WarmDiscoverySession:
                     ytm_raw_tracks = [t for t in raw_tracks if is_valid_ytm_id(t.get("id"))]
                     sp_raw_ids = [t["id"] for t in sp_raw_tracks]
 
-                    # Backfill stripped Feb 2026 Dev Mode track popularity via ReccoBeats /v1/track when filtering deep cuts
-                    missing_pop_ids = [
-                        t["id"]
-                        for t in sp_raw_tracks
-                        if t.get("popularity") is None
-                    ]
+                    missing_pop_ids = [t["id"] for t in sp_raw_tracks if t.get("popularity") is None]
                     if missing_pop_ids and (eff_deep_cuts or len(sp_raw_tracks) > 10):
                         try:
                             meta_pop_map = fetch_track_metadata_batch(missing_pop_ids)
@@ -1442,8 +1583,13 @@ class WarmDiscoverySession:
                             self._log(f"      ⚠️ ReccoBeats YTM lookup warning: {e}", log_cb)
 
                     artist_genre_map = (
-                        self._enrich_artist_genres_for_discovery(sp_raw_tracks, sp, log_cb=log_cb)
-                        if (eff_avoid_genres and sp is not None and sp_raw_tracks)
+                        self._enrich_artist_genres_for_discovery(
+                            sp_raw_tracks,
+                            sp,
+                            log_cb=log_cb,
+                            max_lookups=25 if eff_avoid_genres else 15,
+                        )
+                        if (sp is not None and sp_raw_tracks)
                         else {}
                     )
 
@@ -1520,15 +1666,24 @@ class WarmDiscoverySession:
                                 release_year = str(album["release_date"])[:4]
                             explicit_tag = "Explicit" if t.get("explicit") else "Clean"
 
-                            doc = f"Track: {t['name']} | Artist: {artists_str}"
-                            if release_year:
-                                doc += f" | Year: {release_year}"
-                            doc += f" | Content: {explicit_tag}"
-                            if genres_str:
-                                doc += f" | Genres: {genres_str}"
-                            af_text = format_audio_feature_text(af)
-                            if af_text:
-                                doc += f" | {af_text}"
+                            if clap_active:
+                                doc = build_clap_candidate_text(
+                                    t["name"],
+                                    artists_str,
+                                    genres=genres_str,
+                                    year=release_year,
+                                    audio_features=af,
+                                )
+                            else:
+                                doc = f"Track: {t['name']} | Artist: {artists_str}"
+                                if release_year:
+                                    doc += f" | Year: {release_year}"
+                                doc += f" | Content: {explicit_tag}"
+                                if genres_str:
+                                    doc += f" | Genres: {genres_str}"
+                                af_text = format_audio_feature_text(af)
+                                if af_text:
+                                    doc += f" | {af_text}"
 
                             real_af = af if is_real_audio_features(af) else {}
                             sp_id = t.get("spotify_id") if is_valid_spotify_id(t.get("spotify_id")) else (tid if is_valid_spotify_id(tid) else None)
@@ -1575,53 +1730,187 @@ class WarmDiscoverySession:
                     if not scraped_docs:
                         scraped_docs, scraped_meta = collect_discovery_candidates(relaxed_af=True)
 
-                    if scraped_docs:
+                    newly_added = []
+                    if scraped_docs and needed > 0:
                         scraped_vecs = embed_texts(scraped_docs, self.embed_tokenizer, self.embed_model)
-                        needed = n_new_fetch - len(discovered_tracks)
-                        mmr_ranks = compute_mmr(target_vec, scraped_vecs, top_k=needed, lambda_param=0.65)
+                        if clap_active and scraped_vecs.shape[1] == len(prompt_vec):
+                            p_n = prompt_vec / (float(np.linalg.norm(prompt_vec)) or 1.0)
+                            t_n = taste_centroid / (float(np.linalg.norm(taste_centroid)) or 1.0)
+                            s_norms = np.linalg.norm(scraped_vecs, axis=1, keepdims=True)
+                            s_n = scraped_vecs / np.where(s_norms > 1e-8, s_norms, 1.0)
+                            rel = ((1.0 - eff_taste_weight) * (s_n @ p_n)) + (eff_taste_weight * (s_n @ t_n))
+                            mmr_ranks = compute_scored_mmr(rel, s_n, top_k=needed, lambda_param=0.65)
+                        else:
+                            mmr_ranks = compute_mmr(target_vec, scraped_vecs, top_k=needed, lambda_param=0.65)
                         for idx in mmr_ranks:
                             cand = scraped_meta[idx]
                             pa = cand["primary_artist"]
                             if artist_freq.get(pa, 0) < max_per_artist:
                                 discovered_ids.add(cand["id"])
                                 discovered_fps.add(cand["fingerprint"])
-                                discovered_tracks.append(
-                                    {
-                                        "id": cand["id"],
-                                        "name": cand["name"],
-                                        "artist": cand["artist"],
-                                        "genres": cand["genres"],
-                                        "explicit": cand["explicit"],
-                                        "popularity": cand["popularity"],
-                                        "provider": cand["provider"],
-                                        "spotify_id": cand.get("spotify_id"),
-                                        "video_id": cand.get("video_id"),
-                                        "source": cand.get("source_label") or "New Discovery",
-                                        "bpm": cand["bpm"],
-                                        "energy": cand["energy"],
-                                        "valence": cand["valence"],
-                                        "key": cand["key"],
-                                        "mode": cand["mode"],
-                                        "camelot": cand["camelot"],
-                                        "spotify_url": cand["spotify_url"],
-                                        "youtube_url": cand["youtube_url"],
-                                    }
-                                )
+                                item = {
+                                    "id": cand["id"],
+                                    "name": cand["name"],
+                                    "artist": cand["artist"],
+                                    "genres": cand["genres"],
+                                    "explicit": cand["explicit"],
+                                    "popularity": cand["popularity"],
+                                    "provider": cand["provider"],
+                                    "spotify_id": cand.get("spotify_id"),
+                                    "video_id": cand.get("video_id"),
+                                    "source": cand.get("source_label") or "New Discovery",
+                                    "bpm": cand["bpm"],
+                                    "energy": cand["energy"],
+                                    "valence": cand["valence"],
+                                    "key": cand["key"],
+                                    "mode": cand["mode"],
+                                    "camelot": cand["camelot"],
+                                    "spotify_url": cand["spotify_url"],
+                                    "youtube_url": cand["youtube_url"],
+                                }
+                                discovered_tracks.append(item)
+                                newly_added.append(item)
                                 artist_freq[pa] = artist_freq.get(pa, 0) + 1
+                    return newly_added
+
+                self._emit_progress(progress_cb, 3, "Discovering & Audio", 48, "Searching remote catalogs & audio features")
+                while len(discovered_tracks) < n_new_fetch and agent_loops < max_agent_loops:
+                    check_cancelled(cancel_event)
+                    if agent_loops == 0:
+                        queries = constraints.get("search_queries", [])
+                    else:
+                        tracks_needed = n_new_fetch - len(discovered_tracks)
+                        self._log(f"      -> Asking parser for deeper queries (Need {tracks_needed} more tracks)...", log_cb)
+                        new_constraints = parse_prompt(
+                            active_pipe,
+                            prompt_clean,
+                            past_queries=past_queries,
+                            avoid_artists=eff_avoid_artists,
+                            avoid_genres=eff_avoid_genres,
+                            taste_context=taste_ctx,
+                        )
+                        queries = new_constraints.get("search_queries", [])
+                        if not queries:
+                            break
+
+                    agent_loops += 1
+                    past_low = {pq.lower() for pq in past_queries}
+                    active_queries = [q for q in queries if q and q.lower() not in past_low]
+                    past_queries.extend(active_queries)
+                    if not active_queries and agent_loops > 1:
+                        continue
+
+                    _discover_and_score_wave(
+                        active_queries,
+                        rec_picks=constraints.get("recommended_tracks") if agent_loops == 1 else [],
+                        include_radio=(agent_loops == 1),
+                        needed=max(1, n_new_fetch - len(discovered_tracks)),
+                    )
 
                     if spotify_rate_limited.is_set() and ytm is None:
                         break
 
-                final_playlist.extend(discovered_tracks)
+                if eff_verify_audio and clap_active and discovered_tracks:
+                    check_cancelled(cancel_event)
+                    self._emit_progress(progress_cb, 3, "Discovering & Audio", 64, "Verifying 30s audio previews via CLAP")
+                    discovered_tracks, verify_stats = verify_and_rerank_discovery_candidates(
+                        discovered_tracks,
+                        prompt_vec,
+                        taste_centroid,
+                        self.embed_tokenizer,
+                        self.embed_model,
+                        stage2_dir=STAGE2_DIR,
+                        max_verify=30,
+                        taste_weight=eff_taste_weight,
+                        constraints=constraints,
+                        log_cb=lambda msg: self._log(msg, log_cb),
+                    )
 
-            if not final_playlist:
+                critic_budget = resolve_critic_budget(active_pipe, fast=fast, override_depth=critic_depth)
+                if critic_budget > 0 and not is_single_artist and not (spotify_rate_limited.is_set() and ytm is None):
+                    for c_iter in range(1, critic_budget + 1):
+                        check_cancelled(cancel_event)
+                        pool_summary = summarize_candidate_pool_for_critic(
+                            local_candidates,
+                            discovered_tracks,
+                            constraints,
+                            target_local_count,
+                            target_size,
+                        )
+                        self._emit_progress(
+                            progress_cb,
+                            4,
+                            "Critic Review",
+                            72 + min(10, c_iter * 3),
+                            f"Critic review pass {c_iter}/{critic_budget}",
+                        )
+                        critic_res = run_bounded_critic_step(
+                            active_pipe,
+                            prompt_clean,
+                            pool_summary,
+                            past_queries=past_queries,
+                            taste_context=taste_ctx,
+                            iteration=c_iter,
+                        )
+                        critic_passes += 1
+                        if critic_res.get("sufficient", True):
+                            break
+                        c_queries = [q for q in (critic_res.get("new_queries") or []) if q.lower() not in {pq.lower() for pq in past_queries}]
+                        c_seeds = critic_res.get("seed_tracks") or []
+                        past_queries.extend(c_queries)
+                        self._log(
+                            f"      🔁 Agentic Critic pass {c_iter}/{critic_budget}: {critic_res.get('critique') or 'expanding candidate pool'}",
+                            log_cb,
+                        )
+                        extra_added = _discover_and_score_wave(
+                            c_queries,
+                            rec_picks=c_seeds,
+                            include_radio=False,
+                            needed=max(6, target_size // 3),
+                        )
+                        if extra_added and eff_verify_audio and clap_active:
+                            verified_extra, extra_stats = verify_and_rerank_discovery_candidates(
+                                extra_added,
+                                prompt_vec,
+                                taste_centroid,
+                                self.embed_tokenizer,
+                                self.embed_model,
+                                stage2_dir=STAGE2_DIR,
+                                max_verify=min(12, len(extra_added)),
+                                taste_weight=eff_taste_weight,
+                                constraints=constraints,
+                                log_cb=lambda msg: self._log(msg, log_cb),
+                            )
+                            by_id = {t.get("id"): t for t in verified_extra if t.get("id")}
+                            discovered_tracks = [by_id.get(t.get("id"), t) for t in discovered_tracks]
+                            if isinstance(verify_stats, dict) and isinstance(extra_stats, dict):
+                                verify_stats["verified_count"] = int(verify_stats.get("verified_count", 0)) + int(
+                                    extra_stats.get("verified_count", 0)
+                                )
+                        elif not extra_added:
+                            break
+
+            check_cancelled(cancel_event)
+            self._emit_progress(progress_cb, 5, "Curating Mix", 88, "Balancing tracks & writing curator notes")
+            shortlist, overflow_pool = build_stratified_curator_shortlist(
+                local_candidates,
+                discovered_tracks,
+                target_size=target_size,
+                target_local_count=target_local_count,
+                max_candidates=45,
+            )
+            full_candidate_pool = shortlist + overflow_pool
+            if not full_candidate_pool:
                 raise ValueError("No matching tracks could be found for this prompt and filters.")
 
-            self._log(f"\n[5/5] 🎧 Curating final {target_size} tracks from {len(final_playlist)} candidates...", log_cb)
+            self._log(
+                f"\n[5/5] 🎧 Curating final {target_size} tracks from {len(shortlist)} shortlisted ({len(full_candidate_pool)} total) candidates...",
+                log_cb,
+            )
             vibe_res = vibe_check_playlist(
                 active_pipe,
                 prompt_clean,
-                final_playlist,
+                shortlist,
                 target_size,
                 avoid_artists=eff_avoid_artists,
                 avoid_genres=eff_avoid_genres,
@@ -1630,44 +1919,73 @@ class WarmDiscoverySession:
             if not isinstance(vibe_res, dict):
                 vibe_res = {}
 
+            raw_reasons = vibe_res.get("track_reasons") or {}
+            reason_by_key = {}
+            for s_idx, r_txt in raw_reasons.items():
+                if isinstance(s_idx, int) and 0 <= s_idx < len(shortlist):
+                    tr_s = shortlist[s_idx]
+                    reason_by_key[str(tr_s.get("id") or "")] = r_txt
+                    reason_by_key[f"fp:{get_track_fingerprint(tr_s.get('name', ''), tr_s.get('artist', ''))}"] = r_txt
+
             curated_playlist = select_balanced_indices(
-                final_playlist,
+                full_candidate_pool,
                 vibe_res.get("selected_indices"),
                 target_size=target_size,
                 target_local_count=target_local_count,
                 max_per_artist=max_per_artist,
                 get_fp_fn=get_track_fingerprint,
             )
+            for tr in curated_playlist:
+                if not isinstance(tr, dict):
+                    continue
+                tid_key = str(tr.get("id") or "")
+                fp_key = f"fp:{get_track_fingerprint(tr.get('name', ''), tr.get('artist', ''))}"
+                if reason_by_key.get(tid_key):
+                    tr["reason"] = reason_by_key[tid_key]
+                elif reason_by_key.get(fp_key):
+                    tr["reason"] = reason_by_key[fp_key]
+                tr["locked"] = False
 
             eff_flow = flow_mode or "mmr"
             curated_playlist = sequence_playlist_tracks(curated_playlist, flow_mode=eff_flow)
 
-            self.last_candidates = list(final_playlist)
+            self.chat_session.reset()
+            self.last_candidates = list(full_candidate_pool)
             pl_name = vibe_res.get("playlist_name") or constraints.get("playlist_name") or f"AI: {prompt_clean[:30]}"
             pl_desc = (
                 vibe_res.get("playlist_description")
                 or constraints.get("playlist_description")
                 or "Generated by Music Taste Analyzer"
             )
+            dj_notes = str(vibe_res.get("dj_notes") or "").strip()
             playlist_payload = {
                 "prompt": prompt_clean,
                 "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                 "playlist_name": pl_name,
                 "playlist_description": pl_desc,
+                "dj_notes": dj_notes,
+                "critic_passes": critic_passes,
                 "flow_mode": eff_flow,
                 "provider": eff_provider,
                 "cluster_id": cluster_id,
+                "sub_cluster_id": sub_cluster_id,
                 "avoid_artists": eff_avoid_artists,
                 "avoid_genres": eff_avoid_genres,
+                "chat_history": [],
+                "locked_ids": [],
+                "locked_keys": [],
                 "tracks": curated_playlist,
             }
             self._save_payload(playlist_payload, update_archive=save_to_archive)
             self.last_playlist = playlist_payload
+            self._emit_progress(progress_cb, 5, "Curating Mix", 100, "Playlist ready")
 
             return {
                 "playlist": playlist_payload,
                 "constraints": constraints,
-                "candidate_pool_size": len(final_playlist),
+                "candidate_pool_size": len(full_candidate_pool),
+                "audio_verification": verify_stats,
+                "critic_passes": playlist_payload["critic_passes"],
             }
 
     def swap_track(self, drop_index, flow_mode=None):
@@ -2175,6 +2493,227 @@ class WarmDiscoverySession:
             self.last_playlist = payload
             return {"playlist": payload, "plan": plan}
 
+    def toggle_track_lock(self, track_id, locked=None):
+        """Toggle or set lock protection on a track in the active playlist."""
+        with self._lock:
+            payload = self.last_playlist or load_json_safe(LAST_PL_PATH)
+            if not isinstance(payload, dict) or not payload.get("tracks"):
+                raise ValueError("No active playlist loaded.")
+            self.chat_session.load_from_payload(payload)
+            new_state = self.chat_session.toggle_lock(track_id, locked=locked, tracks=payload["tracks"])
+            payload.update(self.chat_session.serialize())
+            self._save_payload(payload, update_archive=True)
+            self.last_playlist = payload
+            return {
+                "locked": new_state,
+                "track_id": str(track_id),
+                "locked_ids": payload["locked_ids"],
+                "playlist": payload,
+            }
+
+    def get_chat_state(self):
+        """Return persisted DJ chat history and track locks for the active playlist."""
+        with self._lock:
+            payload = self.last_playlist or load_json_safe(LAST_PL_PATH)
+            if isinstance(payload, dict):
+                self.chat_session.load_from_payload(payload)
+            ser = self.chat_session.serialize()
+            return {
+                "history": ser["chat_history"],
+                "locked_ids": ser["locked_ids"],
+                "playlist_name": payload.get("playlist_name") if isinstance(payload, dict) else "",
+            }
+
+    def chat_refine(self, message, fast=False, verify_audio=None, progress_cb=None, log_cb=None):
+        """Stateful multi-turn DJ chat refinement preserving locked tracks and supporting remote refills."""
+        with self._lock:
+            payload = self.last_playlist or load_json_safe(LAST_PL_PATH)
+            if not isinstance(payload, dict) or not payload.get("tracks"):
+                raise ValueError("No active playlist loaded to refine.")
+
+            self.chat_session.load_from_payload(payload)
+            tracks = list(payload["tracks"])
+            active_pipe = None if fast else self.pipe
+            taste_ctx = self._build_taste_context(provider=payload.get("provider") or "spotify")
+            reply, plan = self.chat_session.plan_chat_turn(active_pipe, message, tracks, taste_context=taste_ctx)
+
+            drop_set = set(plan.get("drop_indices") or [])
+            rem_artists = normalize_avoid_list(plan.get("remove_artists") or [])
+            cond = plan.get("filter_condition")
+
+            kept = []
+            dropped_ids = set()
+            dropped_fps = set()
+            for idx, tr in enumerate(tracks):
+                locked = self.chat_session.is_locked(tr)
+                if isinstance(tr, dict):
+                    tr["locked"] = locked
+                if locked:
+                    kept.append(tr)
+                    continue
+                remove = idx in drop_set
+                if not remove and rem_artists and matches_avoided_artist(tr.get("artist", ""), rem_artists):
+                    remove = True
+                if not remove and cond:
+                    bpm = tr.get("bpm")
+                    eng = tr.get("energy")
+                    if cond == "drop_slow" and isinstance(bpm, (int, float)) and bpm < 105:
+                        remove = True
+                    elif cond == "drop_fast" and isinstance(bpm, (int, float)) and bpm > 135:
+                        remove = True
+                    elif cond == "drop_low_energy" and isinstance(eng, (int, float)) and eng < 0.45:
+                        remove = True
+                    elif cond == "drop_high_energy" and isinstance(eng, (int, float)) and eng > 0.75:
+                        remove = True
+                    elif cond == "drop_explicit" and tr.get("explicit"):
+                        remove = True
+                if remove:
+                    dropped_ids.add(tr.get("id"))
+                    dropped_fps.add(get_track_fingerprint(tr.get("name", ""), tr.get("artist", "")))
+                else:
+                    kept.append(tr)
+
+            orig_size = len(tracks)
+            if plan.get("target_size") is not None:
+                desired_size = max(1, min(100, int(plan["target_size"])))
+            else:
+                desired_size = max(1, min(100, orig_size + int(plan.get("delta_tracks") or 0)))
+
+            # Never drop locked tracks when trimming down
+            if len(kept) > desired_size:
+                locked_only = [t for t in kept if self.chat_session.is_locked(t)]
+                unlocked_only = [t for t in kept if not self.chat_session.is_locked(t)]
+                room = max(0, desired_size - len(locked_only))
+                kept = locked_only + unlocked_only[:room]
+            elif len(kept) < desired_size or plan.get("discover_queries"):
+                needed = max(desired_size - len(kept), 0)
+                used_ids = {t.get("id") for t in kept} | dropped_ids
+                used_fps = {get_track_fingerprint(t.get("name", ""), t.get("artist", "")) for t in kept} | dropped_fps
+                disliked_ids, disliked_fps = get_disliked_sets()
+                eff_avoid_art = normalize_avoid_list((payload.get("avoid_artists") or []) + rem_artists + self.session_avoid_artists)
+                eff_avoid_gen = normalize_avoid_list((payload.get("avoid_genres") or []) + self.session_avoid_genres)
+
+                direction = plan.get("direction_prompt")
+                pool = []
+                if not direction and not plan.get("discover_queries") and self.last_candidates:
+                    pool = list(self.last_candidates)
+                else:
+                    if self._stage2_sig()[0][0]:
+                        import numpy as np
+
+                        self._ensure_vectors_loaded(log_cb=log_cb)
+                        self.warm_up(load_llm=False, log_cb=log_cb)
+                        dir_query = direction or payload.get("prompt") or "popular favorites"
+                        q_vec = embed_texts([dir_query], self.embed_tokenizer, self.embed_model)[0]
+                        blended = (0.75 * q_vec) + (0.25 * self.master_centroid)
+                        nrm = float(np.linalg.norm(blended))
+                        t_vec = (blended / nrm) if nrm > 0 else q_vec
+                        mmr_idx = compute_mmr(t_vec, self.local_embeddings, top_k=min(needed + 25, len(self.local_ids)))
+                        pool.extend(self._format_local_track(self.local_ids[i]) for i in mmr_idx)
+
+                    # Optional best-effort remote discovery refill when asked for fresh / specific direction
+                    disc_qs = list(plan.get("discover_queries") or [])
+                    if not disc_qs and direction:
+                        disc_qs = [direction]
+                    if disc_qs and (self.sp is not None or self.ytm is not None):
+                        for dq in disc_qs[:2]:
+                            if self.sp is not None:
+                                try:
+                                    sres = self.sp.search(q=format_spotify_query(dq), type="track", limit=8)
+                                    for rt in ((sres or {}).get("tracks") or {}).get("items") or []:
+                                        if not isinstance(rt, dict) or not rt.get("id"):
+                                            continue
+                                        arts = ", ".join(a.get("name", "") for a in (rt.get("artists") or []) if isinstance(a, dict))
+                                        sp_id = rt["id"] if is_valid_spotify_id(rt["id"]) else None
+                                        pool.append(
+                                            {
+                                                "id": rt["id"],
+                                                "name": rt.get("name", "Unknown"),
+                                                "artist": arts or "Unknown",
+                                                "genres": "",
+                                                "explicit": bool(rt.get("explicit")),
+                                                "provider": "spotify",
+                                                "spotify_id": sp_id,
+                                                "source": "AI Chat Discovery",
+                                                "spotify_url": f"https://open.spotify.com/track/{sp_id}" if sp_id else None,
+                                            }
+                                        )
+                                except Exception:
+                                    pass
+                            if self.ytm is not None:
+                                try:
+                                    yres = self.ytm.search(format_ytm_query(dq), filter="songs", limit=8)
+                                    for raw_yt in yres or []:
+                                        norm = ytmusic_client.normalize_ytm_track(raw_yt)
+                                        if norm:
+                                            arts = ", ".join(a.get("name", "") for a in (norm.get("artists") or []) if isinstance(a, dict))
+                                            vid = norm.get("video_id") or extract_ytm_video_id(norm.get("id"))
+                                            pool.append(
+                                                {
+                                                    "id": norm["id"],
+                                                    "name": norm.get("name", "Unknown"),
+                                                    "artist": arts or "Unknown",
+                                                    "genres": "",
+                                                    "provider": "ytmusic",
+                                                    "video_id": vid,
+                                                    "source": "AI Chat Discovery",
+                                                    "youtube_url": f"https://music.youtube.com/watch?v={vid}" if vid else None,
+                                                }
+                                            )
+                                except Exception:
+                                    pass
+                    if self.last_candidates:
+                        pool.extend(self.last_candidates)
+
+                if needed == 0 and plan.get("discover_queries"):
+                    # Replace last non-locked track(s) if size unchanged but user asked to swap/discover
+                    unlocked_indices = [i for i, t in enumerate(kept) if not self.chat_session.is_locked(t)]
+                    if unlocked_indices:
+                        drop_i = unlocked_indices[-1]
+                        dropped = kept.pop(drop_i)
+                        used_ids.add(dropped.get("id"))
+                        used_fps.add(get_track_fingerprint(dropped.get("name", ""), dropped.get("artist", "")))
+                        desired_size = max(desired_size, len(kept) + 1)
+
+                for cand in pool:
+                    if len(kept) >= desired_size:
+                        break
+                    cid = cand.get("id")
+                    cfp = get_track_fingerprint(cand.get("name", ""), cand.get("artist", ""))
+                    if cid in used_ids or cfp in used_fps or cid in disliked_ids or cfp in disliked_fps:
+                        continue
+                    if matches_avoided_artist(cand.get("artist", ""), eff_avoid_art):
+                        continue
+                    if matches_avoided_genre(cand.get("genres", ""), eff_avoid_gen):
+                        continue
+                    item = dict(cand)
+                    item["locked"] = False
+                    item.setdefault("reason", f"Added via chat: {message[:70]}")
+                    used_ids.add(cid)
+                    used_fps.add(cfp)
+                    kept.append(item)
+
+            if plan.get("flow_mode"):
+                kept = sequence_playlist_tracks(kept, flow_mode=plan["flow_mode"])
+                payload["flow_mode"] = plan["flow_mode"]
+            if plan.get("playlist_name"):
+                payload["playlist_name"] = plan["playlist_name"]
+
+            self.chat_session.append_turn(message, reply, plan=plan)
+            payload["tracks"] = kept
+            if rem_artists:
+                payload["avoid_artists"] = normalize_avoid_list((payload.get("avoid_artists") or []) + rem_artists)
+            payload.update(self.chat_session.serialize())
+            self._save_payload(payload, update_archive=True)
+            self.last_playlist = payload
+            return {
+                "playlist": payload,
+                "assistant_reply": reply,
+                "history": list(self.chat_session.history),
+                "locked_ids": payload["locked_ids"],
+                "plan": plan,
+            }
+
     def update_current_playlist(
         self, playlist_name=None, playlist_description=None, order_indices=None, remove_indices=None
     ):
@@ -2458,6 +2997,11 @@ def main():
     parser.add_argument("--local-only", action="store_true", help="Restrict recommendations to your local library")
     parser.add_argument("--public", action="store_true", help="Create exported Spotify playlist as public")
     parser.add_argument("--cluster", type=int, default=None, help="Seed discovery around a specific Stage 2 cluster ID")
+    parser.add_argument("--sub-cluster", type=int, default=None, help="Seed discovery around a Level-2 sub-vibe ID inside --cluster")
+    parser.add_argument("--known-ratio", type=float, default=None, help="Override local library share (0.0 to 1.0)")
+    parser.add_argument("--taste-weight", type=float, default=None, help="Override taste centroid anchor weight (0.0 to 1.0)")
+    parser.add_argument("--verify-audio", dest="verify_audio", action="store_true", default=None, help="Verify discovery finalists with live Deezer 30s CLAP audio")
+    parser.add_argument("--no-verify-audio", dest="verify_audio", action="store_false", help="Skip live Deezer 30s CLAP audio verification")
     parser.add_argument(
         "--flow",
         choices=["mmr", "energy_ramp", "chill_descent", "warmup_peak_cooldown", "harmonic", "shuffle"],
@@ -2532,6 +3076,10 @@ def main():
                 size=args.size,
                 local_only=args.local_only,
                 cluster_id=args.cluster,
+                sub_cluster_id=args.sub_cluster,
+                known_tracks_ratio=args.known_ratio,
+                taste_weight=args.taste_weight,
+                verify_audio=args.verify_audio,
                 flow_mode=args.flow,
                 clean_only=args.clean,
                 deep_cuts=args.deep_cuts,

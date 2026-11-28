@@ -11,10 +11,19 @@ import config
 from utils import (
     detect_hardware_profile,
     get_effective_preferences,
+    get_masked_llm_keys,
     get_openvino_devices,
     matches_avoided_artist,
     matches_avoided_genre,
     normalize_avoid_list,
+)
+from llm_providers import (
+    CLOUD_LLM_BACKENDS,
+    UnifiedLLMClient,
+    build_cloud_llm_client,
+    infer_capability_tier,
+    resolve_cloud_model,
+    test_llm_connection,
 )
 
 _KNOWN_GENRE_TERMS = {
@@ -122,6 +131,18 @@ _VIBE_CHECK_SCHEMA = {
         "selected_indices": {"type": "array", "items": {"type": "integer"}},
         "playlist_name": {"type": "string"},
         "playlist_description": {"type": "string"},
+        "dj_notes": {"type": "string"},
+        "track_reasons": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["index", "reason"],
+            },
+        },
     },
     "required": ["selected_indices", "playlist_name", "playlist_description"],
 }
@@ -228,12 +249,33 @@ def get_llm_catalog_status(base_dir=None, probe_ollama=False):
         catalog_out.append(item)
 
     active_entry = get_catalog_entry(resolved_key)
+    cloud_model = resolve_cloud_model(backend, prefs.get("cloud_model")) if backend in CLOUD_LLM_BACKENDS else ""
     if backend == "openvino":
         active_label = active_entry.get("short_label") or active_entry.get("name")
+        cap_tier = infer_capability_tier("openvino", resolved_key)
     elif backend == "ollama":
         active_label = f"Ollama ({prefs.get('ollama_model')})"
-    else:
+        cap_tier = infer_capability_tier("ollama", prefs.get("ollama_model"))
+    elif backend == "openai_local":
         active_label = f"Local API ({prefs.get('ollama_model')})"
+        cap_tier = infer_capability_tier("openai_local", prefs.get("ollama_model"))
+    else:
+        p_cfg = (getattr(config, "CLOUD_LLM_PROVIDERS", {}) or {}).get(backend) or {}
+        active_label = f"{p_cfg.get('label', backend.title())} ({cloud_model})"
+        cap_tier = infer_capability_tier(backend, cloud_model)
+
+    masked_keys = get_masked_llm_keys()
+    cloud_providers_out = {}
+    for pk, pcfg in (getattr(config, "CLOUD_LLM_PROVIDERS", {}) or {}).items():
+        kinfo = masked_keys.get(pk) or {}
+        cloud_providers_out[pk] = {
+            "label": pcfg.get("label", pk.title()),
+            "default_model": pcfg.get("default_model", ""),
+            "models": list(pcfg.get("models") or []),
+            "has_key": bool(kinfo.get("has_key")),
+            "masked_key": kinfo.get("masked", ""),
+            "key_source": kinfo.get("source", ""),
+        }
 
     return {
         "active": {
@@ -243,11 +285,15 @@ def get_llm_catalog_status(base_dir=None, probe_ollama=False):
             "llm_device": prefs.get("llm_device", "auto"),
             "ollama_url": prefs.get("ollama_url"),
             "ollama_model": prefs.get("ollama_model"),
+            "cloud_model": cloud_model,
+            "critic_depth": prefs.get("critic_depth", "auto"),
+            "capability_tier": cap_tier,
             "label": active_label,
         },
         "hardware": hw,
         "catalog": catalog_out,
         "ollama_tiers": list(getattr(config, "OLLAMA_RECOMMENDED_TIERS", []) or []),
+        "cloud_providers": cloud_providers_out,
     }
 
 
@@ -263,159 +309,22 @@ def _make_generation_config(max_new_tokens, temperature):
         return None
 
 
-class LocalLLMClient:
-    """Unified wrapper across OpenVINO (with XGrammar JSON Schema), Ollama, and local OpenAI-compatible servers."""
-
-    def __init__(
-        self,
-        backend="openvino",
-        model_key="qwen3-4b-ov",
-        label="Qwen3 4B",
-        device="GPU",
-        pipe=None,
-        base_url=None,
-        ollama_model=None,
-        is_qwen3=False,
-    ):
-        self.backend = backend
-        self.model_key = model_key
-        self.label = label
-        self.device = device
-        self.pipe = pipe
-        self.base_url = str(base_url or getattr(config, "DEFAULT_OLLAMA_URL", "http://127.0.0.1:11434")).rstrip("/")
-        self.ollama_model = str(ollama_model or getattr(config, "DEFAULT_OLLAMA_MODEL", "qwen3:8b"))
-        self.is_qwen3 = bool(is_qwen3)
-
-    def _build_openvino_prompt(self, system_msg, user_msg):
-        sys_txt = str(system_msg or "").strip()
-        usr_txt = str(user_msg or "").strip()
-        if self.is_qwen3 and "/no_think" not in usr_txt:
-            usr_txt = f"{usr_txt}\n/no_think"
-        messages = [
-            {"role": "system", "content": sys_txt},
-            {"role": "user", "content": usr_txt},
-        ]
-        try:
-            tok = self.pipe.get_tokenizer()
-            if tok is not None and hasattr(tok, "apply_chat_template"):
-                if self.is_qwen3:
-                    try:
-                        return tok.apply_chat_template(
-                            messages,
-                            add_generation_prompt=True,
-                            extra_context={"enable_thinking": False},
-                        )
-                    except TypeError:
-                        pass
-                return tok.apply_chat_template(messages, add_generation_prompt=True)
-        except Exception:
-            pass
-        return f"System:\n{sys_txt}\n\nUser:\n{usr_txt}\n\nAssistant:\n"
-
-    def _generate_openvino_json(self, system_msg, user_msg, json_schema=None, max_new_tokens=380, temperature=0.1):
-        import openvino_genai as ov_genai
-
-        prompt = self._build_openvino_prompt(system_msg, user_msg)
-        cfg = ov_genai.GenerationConfig()
-        cfg.max_new_tokens = int(max_new_tokens)
-        cfg.temperature = float(temperature)
-        cfg.do_sample = bool(temperature > 0.05)
-
-        used_schema = False
-        if json_schema is not None and hasattr(ov_genai, "StructuredOutputConfig"):
-            try:
-                cfg.structured_output_config = ov_genai.StructuredOutputConfig(json_schema=json.dumps(json_schema))
-                used_schema = True
-            except Exception:
-                used_schema = False
-
-        try:
-            return self.pipe.generate(prompt, cfg)
-        except Exception:
-            if used_schema:
-                cfg_plain = ov_genai.GenerationConfig()
-                cfg_plain.max_new_tokens = int(max_new_tokens)
-                cfg_plain.temperature = float(temperature)
-                cfg_plain.do_sample = bool(temperature > 0.05)
-                return self.pipe.generate(prompt, cfg_plain)
-            raise
-
-    def _generate_ollama_json(self, system_msg, user_msg, json_schema=None, max_new_tokens=380, temperature=0.1):
-        import requests
-
-        endpoint = f"{self.base_url}/api/chat"
-        payload = {
-            "model": self.ollama_model,
-            "messages": [
-                {"role": "system", "content": str(system_msg or "")},
-                {"role": "user", "content": str(user_msg or "")},
-            ],
-            "stream": False,
-            "think": False,
-            "format": json_schema if isinstance(json_schema, dict) else "json",
-            "options": {"temperature": float(temperature), "num_predict": int(max_new_tokens)},
-        }
-        resp = requests.post(endpoint, json=payload, timeout=90)
-        if resp.status_code == 400 and "think" in resp.text.lower():
-            payload.pop("think", None)
-            resp = requests.post(endpoint, json=payload, timeout=90)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        return str(((data.get("message") or {}).get("content")) or "")
-
-    def _generate_openai_local_json(self, system_msg, user_msg, max_new_tokens=380, temperature=0.1):
-        import requests
-
-        if self.base_url.endswith("/chat/completions"):
-            endpoint = self.base_url
-        elif self.base_url.endswith("/v1"):
-            endpoint = f"{self.base_url}/chat/completions"
-        else:
-            endpoint = f"{self.base_url}/v1/chat/completions"
-        payload = {
-            "model": self.ollama_model,
-            "messages": [
-                {"role": "system", "content": str(system_msg or "")},
-                {"role": "user", "content": str(user_msg or "")},
-            ],
-            "temperature": float(temperature),
-            "max_tokens": int(max_new_tokens),
-            "response_format": {"type": "json_object"},
-        }
-        resp = requests.post(endpoint, json=payload, timeout=90)
-        if resp.status_code == 400 and "response_format" in payload:
-            payload.pop("response_format", None)
-            resp = requests.post(endpoint, json=payload, timeout=90)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Local API HTTP {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        return str(((choices[0].get("message") or {}).get("content")) or "")
-
-    def generate_json(self, system_msg, user_msg, json_schema=None, max_new_tokens=380, temperature=0.1):
-        if self.backend == "ollama":
-            return self._generate_ollama_json(
-                system_msg, user_msg, json_schema=json_schema, max_new_tokens=max_new_tokens, temperature=temperature
-            )
-        if self.backend == "openai_local":
-            return self._generate_openai_local_json(
-                system_msg, user_msg, max_new_tokens=max_new_tokens, temperature=temperature
-            )
-        return self._generate_openvino_json(
-            system_msg, user_msg, json_schema=json_schema, max_new_tokens=max_new_tokens, temperature=temperature
-        )
+LocalLLMClient = UnifiedLLMClient
 
 
-def get_llm(model_key=None, backend=None, device=None, ollama_url=None, ollama_model=None):
+def get_llm(model_key=None, backend=None, device=None, ollama_url=None, ollama_model=None, cloud_model=None):
     prefs = get_effective_preferences()
     eff_backend = str(backend or prefs.get("llm_backend") or "openvino").strip().lower()
     eff_key = str(model_key or prefs.get("llm_model_key") or "auto").strip()
     eff_dev = str(device or prefs.get("llm_device") or "auto").strip()
     eff_url = str(ollama_url or prefs.get("ollama_url") or getattr(config, "DEFAULT_OLLAMA_URL", "http://127.0.0.1:11434"))
     eff_omodel = str(ollama_model or prefs.get("ollama_model") or getattr(config, "DEFAULT_OLLAMA_MODEL", "qwen3:8b"))
+    eff_cmodel = str(cloud_model if cloud_model is not None else (prefs.get("cloud_model") or "")).strip()
+
+    if eff_backend in CLOUD_LLM_BACKENDS:
+        client = build_cloud_llm_client(eff_backend, cloud_model=eff_cmodel)
+        print(f"[LLM] Using {client.label} (tier: {client.capability_tier})", flush=True)
+        return client
 
     if eff_backend in ("ollama", "openai_local"):
         label = f"Ollama: {eff_omodel}" if eff_backend == "ollama" else f"Local API: {eff_omodel}"
@@ -1142,8 +1051,18 @@ Schema:
 def _format_candidate_for_curator(idx, t):
     name = t.get("name", "Unknown")
     artist = t.get("artist", "Unknown")
-    src = "Lib" if t.get("source") == "Local Library" else "New"
+    src_map = {
+        "Local Library": "Lib",
+        "AI Curator Pick": "AIPick",
+        "ReccoBeats Discovery": "RB",
+        "YT Music Radio": "YTMRadio",
+    }
+    src = src_map.get(t.get("source"), "New")
     bits = [f"Src:{src}"]
+    if t.get("audio_verified"):
+        bits.append("AudioOK")
+    if isinstance(t.get("prompt_match"), (int, float)):
+        bits.append(f"Match:{float(t['prompt_match']):.2f}")
     if t.get("bpm") is not None:
         bits.append(f"{t['bpm']}BPM")
     if t.get("energy") is not None:
@@ -1164,6 +1083,8 @@ def vibe_check_playlist(
             "selected_indices": [],
             "playlist_name": _build_aesthetic_title(user_prompt),
             "playlist_description": f"AI Generated playlist for: {user_prompt}",
+            "dj_notes": "",
+            "track_reasons": {},
         }
 
     is_smart_client = isinstance(pipe, LocalLLMClient)
@@ -1176,6 +1097,8 @@ def vibe_check_playlist(
             "selected_indices": default_indices,
             "playlist_name": _build_aesthetic_title(user_prompt),
             "playlist_description": f"Vector & acoustic discovery for: {user_prompt}",
+            "dj_notes": "",
+            "track_reasons": {},
         }
 
     if is_smart_client:
@@ -1203,10 +1126,12 @@ Output ONLY a valid JSON object (no markdown):
 {{
   "selected_indices": [array of integer indices from 0 to {len(capped_candidates) - 1}],
   "playlist_name": "Creative 3-5 word aesthetic playlist title",
-  "playlist_description": "Short 1-2 sentence aesthetic description of the vibe."
+  "playlist_description": "Short 1-2 sentence aesthetic description of the vibe.",
+  "dj_notes": "1 sentence on pacing and transition arc across the set.",
+  "track_reasons": [{{"index": 0, "reason": "4-10 word reason why it fits this slot"}}]
 }}"""
 
-    max_tokens = max(450, min(target_size, len(capped_candidates)) * 10 + 150)
+    max_tokens = max(550, min(target_size, len(capped_candidates)) * 22 + 180)
 
     try:
         if is_smart_client:
@@ -1243,10 +1168,33 @@ Output ONLY a valid JSON object (no markdown):
         if not isinstance(pl_desc, str) or not pl_desc.strip():
             pl_desc = f"AI Generated playlist for: {user_prompt}"
 
+        dj_notes = str(parsed.get("dj_notes") or "").strip()[:280]
+        reasons_map = {}
+        raw_reasons = parsed.get("track_reasons")
+        if isinstance(raw_reasons, list):
+            for item in raw_reasons:
+                if not isinstance(item, dict):
+                    continue
+                r_idx = item.get("index")
+                r_txt = str(item.get("reason") or "").strip()[:140]
+                if isinstance(r_idx, int) and not isinstance(r_idx, bool) and 0 <= r_idx < len(capped_candidates) and r_txt:
+                    reasons_map[r_idx] = r_txt
+        elif isinstance(raw_reasons, dict):
+            for k, v in raw_reasons.items():
+                try:
+                    r_idx = int(k)
+                except (TypeError, ValueError):
+                    continue
+                r_txt = str(v or "").strip()[:140]
+                if 0 <= r_idx < len(capped_candidates) and r_txt:
+                    reasons_map[r_idx] = r_txt
+
         return {
             "selected_indices": valid_indices,
             "playlist_name": pl_name.strip()[:100],
             "playlist_description": pl_desc.strip()[:300],
+            "dj_notes": dj_notes,
+            "track_reasons": reasons_map,
         }
     except Exception as e:
         print(f"      [Vibe Check Failed] Fallback to raw math selection. Error: {e}")
@@ -1254,6 +1202,8 @@ Output ONLY a valid JSON object (no markdown):
             "selected_indices": default_indices,
             "playlist_name": _build_aesthetic_title(user_prompt),
             "playlist_description": f"AI Generated playlist for: {user_prompt}",
+            "dj_notes": "",
+            "track_reasons": {},
         }
 
 

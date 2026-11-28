@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 import webbrowser
 from collections import deque
 from http import HTTPStatus
@@ -30,10 +31,12 @@ for path in (BASE_DIR, STAGE1_DIR, STAGE2_DIR, STAGE3_DIR):
 import config
 import ytmusic_client
 from automation_runner import query_windows_task, register_windows_task, remove_windows_task
+from agent_dj import GenerationCancelledError
 from discovery_engine import LAST_PL_PATH, WarmDiscoverySession
 from history_analytics import compute_history_analytics, find_forgotten_favorites
 from library_hygiene import analyze_library_hygiene, dedupe_spotify_playlist
 from llm_parser import get_llm_catalog_status
+from llm_providers import test_llm_connection
 from reccobeats_client import get_cache_health, purge_poisoned_and_not_found
 from utils import (
     DEFAULT_AUTOMATION_SETTINGS,
@@ -51,6 +54,7 @@ from utils import (
     format_playlist_markdown,
     get_currently_playing_track,
     get_effective_preferences,
+    get_masked_llm_keys,
     get_openvino_devices,
     get_spotify_client_id,
     get_track_fingerprint,
@@ -67,6 +71,7 @@ from utils import (
     record_track_feedback,
     remove_from_spotify_library,
     save_playlist_to_archive,
+    save_llm_api_keys,
     save_to_spotify_library,
     save_user_preferences,
     sequence_playlist_tracks,
@@ -475,6 +480,179 @@ class JobManager:
         return True
 
 
+def _parse_studio_generate_params(body):
+    """Normalize POST /api/studio/generate and /api/studio/generate/start parameters."""
+    raw_cid = body.get("cluster_id")
+    cluster_id = int(raw_cid) if raw_cid not in (None, "") else None
+    raw_sub = body.get("sub_cluster_id")
+    sub_cid = int(raw_sub) if raw_sub not in (None, "") else None
+    raw_ratio = body.get("known_tracks_ratio")
+    known_ratio = (
+        float(raw_ratio)
+        if raw_ratio not in (None, "") and not isinstance(raw_ratio, bool)
+        else None
+    )
+    raw_tw = body.get("taste_weight")
+    taste_w = (
+        float(raw_tw)
+        if raw_tw not in (None, "") and not isinstance(raw_tw, bool)
+        else None
+    )
+    raw_va = body.get("verify_audio")
+    verify_audio = bool(raw_va) if raw_va is not None else None
+    raw_cd = body.get("critic_depth")
+    critic_depth = str(raw_cd).strip().lower() if raw_cd not in (None, "") else None
+    return {
+        "prompt": body.get("prompt", ""),
+        "fast": bool(body.get("fast", False)),
+        "size": body.get("size"),
+        "local_only": bool(body.get("local_only", False)),
+        "cluster_id": cluster_id,
+        "sub_cluster_id": sub_cid,
+        "known_tracks_ratio": known_ratio,
+        "taste_weight": taste_w,
+        "verify_audio": verify_audio,
+        "critic_depth": critic_depth,
+        "flow_mode": body.get("flow_mode") or "mmr",
+        "clean_only": bool(body.get("clean_only", False)),
+        "deep_cuts": bool(body.get("deep_cuts", False)),
+        "avoid_artists": body.get("avoid_artists"),
+        "avoid_genres": body.get("avoid_genres"),
+        "save_to_archive": True,
+        "provider": body.get("provider"),
+    }
+
+
+class StudioRunManager:
+    """Runs Studio playlist generations in background threads and streams SSE progress events."""
+
+    def __init__(self, warm_session, max_runs=8):
+        self.warm_session = warm_session
+        self.max_runs = max(2, int(max_runs))
+        self._lock = threading.RLock()
+        self._runs = {}
+        self._order = deque()
+        self._active_run_id = None
+
+    def _broadcast(self, run, event_name, data):
+        with self._lock:
+            subs = list(run["subscribers"])
+        msg = {"event": event_name, "data": data}
+        for q in subs:
+            try:
+                q.put_nowait(msg)
+            except Exception:
+                pass
+
+    def _prune_locked(self):
+        while len(self._order) > self.max_runs:
+            oldest = self._order.popleft()
+            if oldest != self._active_run_id:
+                self._runs.pop(oldest, None)
+
+    def start_run(self, params):
+        run_id = f"studio-{uuid.uuid4().hex[:12]}"
+        cancel_ev = threading.Event()
+        with self._lock:
+            # Cancel any previous still-running studio run
+            prev_id = self._active_run_id
+            if prev_id and prev_id in self._runs and self._runs[prev_id]["status"] == "running":
+                self._runs[prev_id]["cancel_event"].set()
+
+            run = {
+                "run_id": run_id,
+                "status": "running",
+                "progress": {"step": 1, "label": "Planning", "pct": 2, "detail": "Starting playlist generation"},
+                "logs": deque(maxlen=400),
+                "result": None,
+                "error": None,
+                "cancel_event": cancel_ev,
+                "subscribers": [],
+            }
+            self._runs[run_id] = run
+            self._order.append(run_id)
+            self._active_run_id = run_id
+            self._prune_locked()
+
+        def on_progress(ev):
+            with self._lock:
+                run["progress"] = dict(ev)
+            self._broadcast(run, "progress", ev)
+
+        def on_log(line):
+            text = str(line or "")
+            with self._lock:
+                run["logs"].append(text)
+            self._broadcast(run, "log", {"line": text})
+
+        def worker():
+            try:
+                gen_params = dict(params)
+                gen_params["progress_cb"] = on_progress
+                gen_params["cancel_event"] = cancel_ev
+                gen_params["log_cb"] = on_log
+                res = self.warm_session.generate(**gen_params)
+                with self._lock:
+                    run["status"] = "complete"
+                    run["progress"] = {"step": 5, "label": "Curating Mix", "pct": 100, "detail": "Playlist ready"}
+                    run["result"] = res
+                    if self._active_run_id == run_id:
+                        self._active_run_id = None
+                self._broadcast(run, "complete", res)
+            except GenerationCancelledError:
+                with self._lock:
+                    run["status"] = "cancelled"
+                    run["error"] = "Generation cancelled by user."
+                    if self._active_run_id == run_id:
+                        self._active_run_id = None
+                self._broadcast(run, "cancelled", {"run_id": run_id, "message": "Generation cancelled by user."})
+            except Exception as exc:
+                with self._lock:
+                    run["status"] = "error"
+                    run["error"] = str(exc)
+                    if self._active_run_id == run_id:
+                        self._active_run_id = None
+                self._broadcast(run, "error", {"run_id": run_id, "error": str(exc)})
+
+        th = threading.Thread(target=worker, daemon=True)
+        th.start()
+        return {"run_id": run_id, "status": "running"}
+
+    def cancel_run(self, run_id=None):
+        with self._lock:
+            target_id = run_id or self._active_run_id
+            run = self._runs.get(target_id) if target_id else None
+            if not run:
+                return {"cancelled": False, "run_id": target_id}
+            run["cancel_event"].set()
+            return {"cancelled": True, "run_id": target_id}
+
+    def subscribe_and_snapshot(self, run_id=None):
+        with self._lock:
+            target_id = run_id or self._active_run_id or (self._order[-1] if self._order else None)
+            run = self._runs.get(target_id) if target_id else None
+            if not run:
+                return None, None, None
+            q = Queue(maxsize=500)
+            run["subscribers"].append(q)
+            snap = {
+                "run_id": run["run_id"],
+                "status": run["status"],
+                "progress": dict(run["progress"]),
+                "logs": list(run["logs"]),
+                "result": run["result"],
+                "error": run["error"],
+            }
+            return run, q, snap
+
+    def unsubscribe(self, run, q):
+        if not run or not q:
+            return
+        with self._lock:
+            if q in run["subscribers"]:
+                run["subscribers"].remove(q)
+
+
 def _cached_json_summary(app_ctx, path, extractor_fn, default_val):
     """Cache compact metadata summaries keyed by (mtime_ns, size) to avoid re-parsing multi-MB JSONs."""
     if not path:
@@ -856,6 +1034,58 @@ def make_handler(app_ctx):
             finally:
                 jm.unsubscribe(q)
 
+        def _handle_studio_sse_stream(self, qs):
+            srm = app_ctx["studio_runs"]
+            run_id = (qs.get("run_id") or [None])[0]
+            run, q, snap = srm.subscribe_and_snapshot(run_id=run_id)
+            if not run or not snap:
+                return self._send_json(HTTPStatus.NOT_FOUND, {"error": "Studio generation run not found."})
+
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            try:
+                init_frame = f"event: snapshot\ndata: {json.dumps(snap, ensure_ascii=False)}\n\n".encode("utf-8")
+                self.wfile.write(init_frame)
+                self.wfile.flush()
+
+                status = snap.get("status")
+                if status == "complete":
+                    term = f"event: complete\ndata: {json.dumps(snap.get('result') or {}, ensure_ascii=False)}\n\n".encode("utf-8")
+                    self.wfile.write(term)
+                    self.wfile.flush()
+                    return
+                if status == "cancelled":
+                    term = f"event: cancelled\ndata: {json.dumps({'run_id': snap['run_id'], 'message': snap.get('error') or 'Cancelled.'}, ensure_ascii=False)}\n\n".encode("utf-8")
+                    self.wfile.write(term)
+                    self.wfile.flush()
+                    return
+                if status == "error":
+                    term = f"event: error\ndata: {json.dumps({'run_id': snap['run_id'], 'error': snap.get('error') or 'Unknown error.'}, ensure_ascii=False)}\n\n".encode("utf-8")
+                    self.wfile.write(term)
+                    self.wfile.flush()
+                    return
+
+                while not app_ctx["stop_event"].is_set():
+                    try:
+                        msg = q.get(timeout=5.0)
+                        ev = msg["event"]
+                        frame = f"event: {ev}\ndata: {json.dumps(msg['data'], ensure_ascii=False)}\n\n".encode("utf-8")
+                        self.wfile.write(frame)
+                        self.wfile.flush()
+                        if ev in ("complete", "cancelled", "error"):
+                            break
+                    except Empty:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                pass
+            finally:
+                srm.unsubscribe(run, q)
+
         def do_GET(self):
             if not self._validate_request_origin(require_same_origin=False):
                 return
@@ -1035,6 +1265,12 @@ def make_handler(app_ctx):
                 if path == "/api/jobs/stream":
                     return self._handle_sse_stream()
 
+                if path == "/api/studio/generate/stream":
+                    return self._handle_studio_sse_stream(qs)
+
+                if path == "/api/studio/chat":
+                    return self._send_json(HTTPStatus.OK, app_ctx["warm_session"].get_chat_state())
+
                 if path == "/api/jobs/snapshot":
                     return self._send_json(HTTPStatus.OK, app_ctx["job_manager"].get_snapshot())
 
@@ -1158,6 +1394,8 @@ def make_handler(app_ctx):
                             "preferences": prefs,
                             "spotify_client_id_masked": masked,
                             "has_client_id": bool(cid),
+                            "llm_api_keys_masked": get_masked_llm_keys(),
+                            "cloud_providers": getattr(config, "CLOUD_LLM_PROVIDERS", {}),
                         },
                     )
 
@@ -1278,19 +1516,37 @@ def make_handler(app_ctx):
 
                 if path == "/api/studio/generate":
                     ws = app_ctx["warm_session"]
-                    res = ws.generate(
-                        prompt=body.get("prompt", ""),
+                    res = ws.generate(**_parse_studio_generate_params(body))
+                    return self._send_json(HTTPStatus.OK, res)
+
+                if path == "/api/studio/generate/start":
+                    params = _parse_studio_generate_params(body)
+                    if not str(params.get("prompt") or "").strip() and params.get("cluster_id") is None:
+                        raise ValueError("Enter a prompt or select a taste cluster to expand.")
+                    return self._send_json(HTTPStatus.OK, app_ctx["studio_runs"].start_run(params))
+
+                if path == "/api/studio/generate/cancel":
+                    return self._send_json(
+                        HTTPStatus.OK,
+                        app_ctx["studio_runs"].cancel_run(run_id=body.get("run_id")),
+                    )
+
+                if path == "/api/studio/chat":
+                    ws = app_ctx["warm_session"]
+                    raw_va = body.get("verify_audio")
+                    verify_audio = bool(raw_va) if raw_va is not None else None
+                    res = ws.chat_refine(
+                        message=body.get("message") or body.get("instruction") or "",
                         fast=bool(body.get("fast", False)),
-                        size=body.get("size"),
-                        local_only=bool(body.get("local_only", False)),
-                        cluster_id=body.get("cluster_id"),
-                        flow_mode=body.get("flow_mode") or "mmr",
-                        clean_only=bool(body.get("clean_only", False)),
-                        deep_cuts=bool(body.get("deep_cuts", False)),
-                        avoid_artists=body.get("avoid_artists"),
-                        avoid_genres=body.get("avoid_genres"),
-                        save_to_archive=True,
-                        provider=body.get("provider"),
+                        verify_audio=verify_audio,
+                    )
+                    return self._send_json(HTTPStatus.OK, res)
+
+                if path == "/api/studio/lock":
+                    ws = app_ctx["warm_session"]
+                    res = ws.toggle_track_lock(
+                        track_id=body.get("track_id"),
+                        locked=body.get("locked"),
                     )
                     return self._send_json(HTTPStatus.OK, res)
 
@@ -1695,6 +1951,19 @@ def make_handler(app_ctx):
                     target_url = body.get("ollama_url") or get_effective_preferences().get("ollama_url")
                     return self._send_json(HTTPStatus.OK, probe_ollama_server(target_url, timeout=1.5))
 
+                if path == "/api/llm/test":
+                    prefs = get_effective_preferences()
+                    raw_key = str(body.get("api_key") or "").strip()
+                    clean_key = None if (not raw_key or "..." in raw_key or raw_key.lower() == "set") else raw_key
+                    res = test_llm_connection(
+                        backend=body.get("backend") or body.get("llm_backend") or prefs.get("llm_backend"),
+                        cloud_model=body.get("cloud_model") if "cloud_model" in body else prefs.get("cloud_model"),
+                        api_key=clean_key,
+                        ollama_url=body.get("ollama_url") or prefs.get("ollama_url"),
+                        ollama_model=body.get("ollama_model") or prefs.get("ollama_model"),
+                    )
+                    return self._send_json(HTTPStatus.OK, res)
+
                 if path == "/api/preferences":
                     cid_val = body.get("spotify_client_id")
                     clean_cid = cid_val.strip() if isinstance(cid_val, str) else ""
@@ -1702,11 +1971,23 @@ def make_handler(app_ctx):
                         raise ValueError("Invalid Spotify Client ID format (expected 16-64 alphanumeric characters).")
 
                     prev_prefs = get_effective_preferences()
-                    llm_keys = ("llm_backend", "llm_model_key", "llm_device", "ollama_url", "ollama_model")
+                    llm_keys = (
+                        "llm_backend",
+                        "llm_model_key",
+                        "llm_device",
+                        "ollama_url",
+                        "ollama_model",
+                        "cloud_model",
+                        "critic_depth",
+                    )
                     prev_sig = tuple(prev_prefs.get(k) for k in llm_keys)
+                    prev_api_keys = get_masked_llm_keys()
                     updated = save_user_preferences(body.get("preferences") or body)
+                    if isinstance(body.get("llm_api_keys"), dict):
+                        save_llm_api_keys(body["llm_api_keys"])
                     new_sig = tuple(updated.get(k) for k in llm_keys)
-                    if prev_sig != new_sig:
+                    new_api_keys = get_masked_llm_keys()
+                    if prev_sig != new_sig or prev_api_keys != new_api_keys:
                         app_ctx["warm_session"].unload_llm()
                     if clean_cid:
                         atomic_write_text(os.path.join(app_ctx["base_dir"], ".spotify_client_id"), clean_cid + "\n")
@@ -1770,10 +2051,12 @@ def create_server(host=None, port=None):
     bind_host = host or getattr(config, "WEB_HOST", "127.0.0.1")
     bind_port = int(port if port is not None else getattr(config, "WEB_PORT", 8765))
 
+    ws = WarmDiscoverySession()
     app_ctx = {
         "base_dir": BASE_DIR,
         "job_manager": JobManager(BASE_DIR),
-        "warm_session": WarmDiscoverySession(),
+        "warm_session": ws,
+        "studio_runs": StudioRunManager(ws),
         "stop_event": threading.Event(),
     }
 

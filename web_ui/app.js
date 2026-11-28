@@ -505,12 +505,20 @@
         const prev = sel.value;
         sel.innerHTML = `<option value="">Global Master Taste Centroid</option>` +
             clusters
-                .map(
-                    (c) =>
-                        `<option value="${escapeHtml(c.cluster_id)}">C${escapeHtml(c.cluster_id)}: ${escapeHtml(
-                            c.vibe_label
-                        )} (${escapeHtml(c.weighted_share_pct)}%)</option>`
-                )
+                .map((c) => {
+                    const parentOpt = `<option value="${escapeHtml(c.cluster_id)}">C${escapeHtml(c.cluster_id)}: ${escapeHtml(
+                        c.vibe_label
+                    )} (${escapeHtml(c.weighted_share_pct)}%)</option>`;
+                    const subOpts = (c.subclusters || [])
+                        .map(
+                            (sc) =>
+                                `<option value="${escapeHtml(c.cluster_id)}:${escapeHtml(sc.sub_cluster_id)}">&nbsp;&nbsp;↳ S${escapeHtml(
+                                    sc.sub_cluster_id
+                                )}: ${escapeHtml(sc.vibe_label)} (${escapeHtml(sc.raw_percentage)}%)</option>`
+                        )
+                        .join("");
+                    return parentOpt + subOpts;
+                })
                 .join("");
         if (prev && Array.from(sel.options).some((o) => o.value === prev)) {
             sel.value = prev;
@@ -720,11 +728,30 @@
             const avgVal = (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2);
             badges.push(`<span class="badge badge-ok">Valence ${escapeHtml(avgVal)}</span>`);
         }
+        const verifiedCnt = tracks.filter((t) => Boolean(t.audio_verified)).length;
+        if (verifiedCnt > 0) {
+            badges.push(`<span class="badge badge-ok">Audio verified: ${escapeHtml(verifiedCnt)}</span>`);
+        }
+        if (typeof playlist.critic_passes === "number" && playlist.critic_passes > 0) {
+            badges.push(`<span class="badge badge-info">Critic: ${escapeHtml(playlist.critic_passes)}</span>`);
+        }
         if (candidateCount) {
             badges.push(`<span class="badge badge-info">Pool: ${escapeHtml(candidateCount)}</span>`);
         }
         document.getElementById("resMetaBadges").innerHTML = badges.join("");
         document.getElementById("resequenceSelect").value = playlist.flow_mode || "mmr";
+
+        const djNotesEl = document.getElementById("resDjNotes");
+        if (djNotesEl) {
+            if (playlist.dj_notes) {
+                djNotesEl.textContent = playlist.dj_notes;
+                djNotesEl.style.display = "block";
+            } else {
+                djNotesEl.textContent = "";
+                djNotesEl.style.display = "none";
+            }
+        }
+        renderStudioChatState(playlist.chat_history || [], playlist.locked_ids || []);
 
         const pid = encodeURIComponent(playlist.id || "last");
         document.getElementById("btnDlCsv").href = `/api/playlists/${pid}/download?format=csv`;
@@ -759,11 +786,16 @@
                 const canPreview = Boolean(spId || vid);
                 const isLiked = Boolean(t.id && likedMap[t.id]);
                 const isDisliked = Boolean(t.id && dislikedMap[t.id]);
+                const isLocked = Boolean(t.locked);
+                const lockSvg = isLocked
+                    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`
+                    : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.4-2"/></svg>`;
+                const reasonHtml = t.reason ? `<div class="track-reason">${escapeHtml(t.reason)}</div>` : "";
                 return `
                 <tr draggable="true" data-idx="${idx}">
                     <td><span class="drag-handle" title="Drag row to reorder">⋮⋮</span></td>
                     <td>${idx + 1}</td>
-                    <td>${link}</td>
+                    <td>${link}${reasonHtml}</td>
                     <td>${escapeHtml(t.artist)}</td>
                     <td>
                         <span class="badge ${srcBadge}">${escapeHtml(t.source || "")}</span>
@@ -775,6 +807,7 @@
                     <td>${t.camelot ? escapeHtml(t.camelot) : "-"}</td>
                     <td>
                         <div class="btn-row" style="gap:4px;">
+                            <button class="btn btn-xs track-lock-btn ${isLocked ? "active-lock" : ""}" data-track-id="${escapeHtml(t.id || "")}" data-locked="${isLocked ? "1" : "0"}" type="button" title="${isLocked ? "Unlock track" : "Lock track during DJ chat"}">${lockSvg}</button>
                             ${canPreview ? `<button class="btn btn-xs preview-btn" data-sp-id="${escapeHtml(spId)}" data-vid="${escapeHtml(vid)}" data-provider="${escapeHtml(prov)}" data-title="${escapeHtml(t.name)} — ${escapeHtml(t.artist)}" type="button" title="Preview">▶</button>` : ""}
                             ${spId ? `<button class="btn btn-xs save-lib-btn" data-id="${escapeHtml(spId)}" data-title="${escapeHtml(t.name)}" type="button" title="Save to Spotify Library">♡</button>` : ""}
                             <button class="btn btn-xs fb-btn like-btn ${isLiked ? "active-like" : ""}" data-idx="${idx}" type="button" title="Like track">+</button>
@@ -788,11 +821,38 @@
             .join("");
     }
 
+    function renderStudioChatState(history, lockedIds) {
+        const threadEl = document.getElementById("studioChatThread");
+        const lockSumEl = document.getElementById("studioLockedSummary");
+        if (lockSumEl) {
+            const cnt = Array.isArray(lockedIds) ? lockedIds.length : 0;
+            lockSumEl.textContent = `${cnt} locked`;
+        }
+        if (threadEl) {
+            if (Array.isArray(history) && history.length) {
+                threadEl.style.display = "flex";
+                threadEl.innerHTML = history
+                    .map((m) => `<div class="chat-bubble ${m.role === "user" ? "user" : "assistant"}">${escapeHtml(m.content || "")}</div>`)
+                    .join("");
+                threadEl.scrollTop = threadEl.scrollHeight;
+            } else {
+                threadEl.style.display = "none";
+                threadEl.innerHTML = "";
+            }
+        }
+    }
+
     async function loadLastPlaylistIntoStudio() {
         try {
             const res = await apiJson("/api/playlists");
             if (res.last && res.last.tracks && res.last.tracks.length) {
                 renderPlaylistResult(res.last);
+                try {
+                    const chat = await apiJson("/api/studio/chat");
+                    renderStudioChatState(chat.history || [], chat.locked_ids || []);
+                } catch (_) {
+                    /* optional hydration */
+                }
             }
         } catch (err) {
             console.error(err);
@@ -1805,8 +1865,39 @@
 
     function toggleOllamaBox() {
         const backend = document.getElementById("prefLlmBackend").value;
-        const box = document.getElementById("ollamaConfigBox");
-        if (box) box.style.display = (backend === "ollama" || backend === "openai_local") ? "block" : "none";
+        const ollamaBox = document.getElementById("ollamaConfigBox");
+        const cloudBox = document.getElementById("cloudLlmConfigBox");
+        const tierCards = document.getElementById("llmTierCards");
+        const isCloud = ["gemini", "openai", "anthropic", "openrouter"].includes(backend);
+        if (ollamaBox) ollamaBox.style.display = (backend === "ollama" || backend === "openai_local") ? "block" : "none";
+        if (cloudBox) cloudBox.style.display = isCloud ? "block" : "none";
+        if (tierCards) tierCards.style.display = isCloud ? "none" : "grid";
+        if (isCloud) renderCloudProviderConfig(backend);
+    }
+
+    function renderCloudProviderConfig(backend) {
+        const catalogData = state.llmCatalogData || {};
+        const providers = catalogData.cloud_providers || {};
+        const pCfg = providers[backend] || {};
+        const titleEl = document.getElementById("cloudProviderTitle");
+        const modelEl = document.getElementById("prefCloudModel");
+        const maskEl = document.getElementById("prefCloudKeyMask");
+        const chipsEl = document.getElementById("cloudModelChips");
+        if (titleEl) titleEl.textContent = pCfg.label || backend;
+        if (maskEl) maskEl.textContent = pCfg.has_key ? pCfg.masked_key : "Not set";
+        if (modelEl && (!modelEl.value || !((pCfg.models || []).some((m) => m.id === modelEl.value)))) {
+            modelEl.value = (catalogData.active && catalogData.active.llm_backend === backend && catalogData.active.cloud_model)
+                ? catalogData.active.cloud_model
+                : (pCfg.default_model || "");
+        }
+        if (chipsEl) {
+            chipsEl.innerHTML = `<span class="muted">Models:</span>` +
+                (pCfg.models || [])
+                    .map(
+                        (m) => `<button type="button" class="chip-btn cloud-model-pick-btn" data-model="${escapeHtml(m.id)}">${escapeHtml(m.label || m.id)} (${escapeHtml(m.tier || "standard")})</button>`
+                    )
+                    .join("");
+        }
     }
 
     function renderOllamaSuggestions(tiers, detectedModels) {
@@ -1840,10 +1931,14 @@
         const deviceEl = document.getElementById("prefLlmDevice");
         const urlEl = document.getElementById("prefOllamaUrl");
         const modelEl = document.getElementById("prefOllamaModel");
+        const cModelEl = document.getElementById("prefCloudModel");
+        const cDepthEl = document.getElementById("prefCriticDepth");
         if (backendEl) backendEl.value = active.llm_backend || "openvino";
         if (deviceEl) deviceEl.value = active.llm_device || "auto";
         if (urlEl && active.ollama_url) urlEl.value = active.ollama_url;
         if (modelEl && active.ollama_model) modelEl.value = active.ollama_model;
+        if (cModelEl && active.cloud_model) cModelEl.value = active.cloud_model;
+        if (cDepthEl && active.critic_depth) cDepthEl.value = active.critic_depth;
         toggleOllamaBox();
 
         const bannerEl = document.getElementById("llmHardwareBanner");
@@ -2011,7 +2106,11 @@
             document.getElementById("studioSizeVal").textContent = String(preset.size);
         }
         if (preset.flow_mode) document.getElementById("studioFlow").value = preset.flow_mode;
-        if (preset.fast != null) document.getElementById("studioFastMode").checked = Boolean(preset.fast);
+        if (preset.fast != null) {
+            document.getElementById("studioFastMode").checked = Boolean(preset.fast);
+            const vaEl = document.getElementById("studioVerifyAudio");
+            if (vaEl) vaEl.checked = !Boolean(preset.fast);
+        }
         if (preset.local_only != null) document.getElementById("studioLocalOnly").checked = Boolean(preset.local_only);
         if (preset.clean_only != null) document.getElementById("studioCleanOnly").checked = Boolean(preset.clean_only);
         if (preset.deep_cuts != null) document.getElementById("studioDeepCuts").checked = Boolean(preset.deep_cuts);
@@ -2484,36 +2583,191 @@
         });
         document.getElementById("studioActiveModelPill").addEventListener("click", () => switchTab("preferences"));
 
+        document.getElementById("studioFastMode").addEventListener("change", (e) => {
+            const vaEl = document.getElementById("studioVerifyAudio");
+            if (vaEl) vaEl.checked = !e.target.checked;
+        });
+
+        const ratioSlider = document.getElementById("studioKnownRatio");
+        const ratioAuto = document.getElementById("studioKnownRatioAuto");
+        const ratioVal = document.getElementById("studioKnownRatioVal");
+        const syncRatioUi = () => {
+            if (!ratioSlider || !ratioVal) return;
+            const auto = ratioAuto ? ratioAuto.checked : true;
+            ratioSlider.disabled = auto || Boolean(document.getElementById("studioLocalOnly")?.checked);
+            if (document.getElementById("studioLocalOnly")?.checked) {
+                ratioVal.textContent = "100% library";
+            } else if (auto) {
+                ratioVal.textContent = `Auto (${ratioSlider.value}%)`;
+            } else {
+                ratioVal.textContent = `${ratioSlider.value}% library`;
+            }
+        };
+        if (ratioSlider && ratioAuto) {
+            ratioAuto.addEventListener("change", syncRatioUi);
+            ratioSlider.addEventListener("input", syncRatioUi);
+            document.getElementById("studioLocalOnly")?.addEventListener("change", syncRatioUi);
+            syncRatioUi();
+        }
+
+        const twSlider = document.getElementById("studioTasteWeight");
+        const twAuto = document.getElementById("studioTasteWeightAuto");
+        const twVal = document.getElementById("studioTasteWeightVal");
+        const syncTwUi = () => {
+            if (!twSlider || !twVal) return;
+            const auto = twAuto ? twAuto.checked : true;
+            twSlider.disabled = auto;
+            twVal.textContent = auto ? "Auto" : `${twSlider.value}%`;
+        };
+        if (twSlider && twAuto) {
+            twAuto.addEventListener("change", syncTwUi);
+            twSlider.addEventListener("input", syncTwUi);
+            syncTwUi();
+        }
+
+        let activeStudioEs = null;
+        let activeStudioRunId = null;
+
+        const updateStudioProgressUi = (ev) => {
+            const panel = document.getElementById("studioProgressPanel");
+            if (!panel) return;
+            panel.style.display = "block";
+            const step = Number((ev && ev.step) || 1);
+            const pct = Math.max(0, Math.min(100, Number((ev && ev.pct) || 0)));
+            const pctEl = document.getElementById("studioProgressPct");
+            const barEl = document.getElementById("studioProgressBar");
+            const detailEl = document.getElementById("studioProgressDetail");
+            if (pctEl) pctEl.textContent = `${pct}%`;
+            if (barEl) barEl.style.width = `${pct}%`;
+            if (detailEl) detailEl.textContent = (ev && (ev.detail || ev.label)) || "Working";
+            document.querySelectorAll("#studioProgressSteps .progress-step").forEach((pill) => {
+                const s = Number(pill.dataset.step || 0);
+                pill.classList.toggle("done", s < step || pct === 100);
+                pill.classList.toggle("active", s === step && pct < 100);
+            });
+        };
+
+        document.getElementById("btnCancelGenerate")?.addEventListener("click", async () => {
+            const cancelBtn = document.getElementById("btnCancelGenerate");
+            if (cancelBtn) cancelBtn.disabled = true;
+            try {
+                await apiJson("/api/studio/generate/cancel", {
+                    method: "POST",
+                    body: { run_id: activeStudioRunId },
+                });
+            } catch (_) {
+                /* stream handler completes UI reset */
+            }
+        });
+
         document.getElementById("btnGeneratePlaylist").addEventListener("click", async () => {
             const btn = document.getElementById("btnGeneratePlaylist");
+            const cancelBtn = document.getElementById("btnCancelGenerate");
+            const panel = document.getElementById("studioProgressPanel");
             const clusterRaw = document.getElementById("studioCluster").value;
             const prompt = document.getElementById("studioPrompt").value.trim();
             if (!prompt && !clusterRaw) {
                 showToast("Enter a prompt or select a taste cluster to expand.", "err");
                 return;
             }
+            let clusterId = null;
+            let subClusterId = null;
+            if (clusterRaw !== "") {
+                if (clusterRaw.includes(":")) {
+                    const [cidPart, sidPart] = clusterRaw.split(":", 2);
+                    clusterId = parseInt(cidPart, 10);
+                    subClusterId = parseInt(sidPart, 10);
+                } else {
+                    clusterId = parseInt(clusterRaw, 10);
+                }
+            }
+            const verifyAudioEl = document.getElementById("studioVerifyAudio");
+            const knownRatioVal = ratioAuto && !ratioAuto.checked && ratioSlider ? parseFloat(ratioSlider.value) / 100.0 : null;
+            const tasteWeightVal = twAuto && !twAuto.checked && twSlider ? parseFloat(twSlider.value) / 100.0 : null;
+            const criticDepthVal = document.getElementById("studioCriticDepth")?.value || null;
+            const genBody = {
+                prompt,
+                fast: document.getElementById("studioFastMode").checked,
+                size: parseInt(document.getElementById("studioSize").value, 10),
+                local_only: document.getElementById("studioLocalOnly").checked,
+                cluster_id: Number.isNaN(clusterId) ? null : clusterId,
+                sub_cluster_id: Number.isNaN(subClusterId) ? null : subClusterId,
+                known_tracks_ratio: knownRatioVal,
+                taste_weight: tasteWeightVal,
+                verify_audio: verifyAudioEl ? verifyAudioEl.checked : null,
+                critic_depth: criticDepthVal,
+                flow_mode: document.getElementById("studioFlow").value,
+                clean_only: document.getElementById("studioCleanOnly").checked,
+                deep_cuts: document.getElementById("studioDeepCuts").checked,
+            };
+
+            if (activeStudioEs) {
+                activeStudioEs.close();
+                activeStudioEs = null;
+            }
             btn.disabled = true;
-            btn.textContent = "⏳ Generating Playlist...";
+            btn.textContent = "Generating playlist...";
+            if (cancelBtn) cancelBtn.disabled = false;
+            updateStudioProgressUi({ step: 1, pct: 4, detail: "Starting generation" });
+
             try {
-                const res = await apiJson("/api/studio/generate", {
+                const startRes = await apiJson("/api/studio/generate/start", {
                     method: "POST",
-                    body: {
-                        prompt,
-                        fast: document.getElementById("studioFastMode").checked,
-                        size: parseInt(document.getElementById("studioSize").value, 10),
-                        local_only: document.getElementById("studioLocalOnly").checked,
-                        cluster_id: clusterRaw === "" ? null : parseInt(clusterRaw, 10),
-                        flow_mode: document.getElementById("studioFlow").value,
-                        clean_only: document.getElementById("studioCleanOnly").checked,
-                        deep_cuts: document.getElementById("studioDeepCuts").checked,
-                    },
+                    body: genBody,
                 });
-                renderPlaylistResult(res.playlist, res.candidate_pool_size);
-                await refreshStatus();
-                showToast(`Generated "${res.playlist.playlist_name}"!`, "ok");
+                activeStudioRunId = startRes.run_id;
+                await new Promise((resolve) => {
+                    const es = new EventSource(`/api/studio/generate/stream?run_id=${encodeURIComponent(startRes.run_id)}`);
+                    activeStudioEs = es;
+                    const finish = () => {
+                        es.close();
+                        if (activeStudioEs === es) activeStudioEs = null;
+                        activeStudioRunId = null;
+                        resolve();
+                    };
+                    es.addEventListener("snapshot", (e) => {
+                        try {
+                            const snap = JSON.parse(e.data);
+                            if (snap.progress) updateStudioProgressUi(snap.progress);
+                        } catch (_) {}
+                    });
+                    es.addEventListener("progress", (e) => {
+                        try {
+                            updateStudioProgressUi(JSON.parse(e.data));
+                        } catch (_) {}
+                    });
+                    es.addEventListener("complete", async (e) => {
+                        try {
+                            const res = JSON.parse(e.data);
+                            renderPlaylistResult(res.playlist, res.candidate_pool_size);
+                            await refreshStatus();
+                            showToast(`Generated "${res.playlist.playlist_name}".`, "ok");
+                        } catch (err) {
+                            showToast(err.message || "Render error", "err");
+                        } finally {
+                            finish();
+                        }
+                    });
+                    es.addEventListener("cancelled", () => {
+                        showToast("Playlist generation cancelled.", "info");
+                        finish();
+                    });
+                    es.addEventListener("error", (e) => {
+                        let errMsg = "Playlist generation failed.";
+                        try {
+                            if (e && e.data) {
+                                const parsed = JSON.parse(e.data);
+                                errMsg = parsed.error || errMsg;
+                            }
+                        } catch (_) {}
+                        showToast(errMsg, "err");
+                        finish();
+                    });
+                });
             } catch (err) {
                 showToast(err.message, "err");
             } finally {
+                if (panel) panel.style.display = "none";
                 btn.disabled = false;
                 btn.textContent = "Generate playlist";
             }
@@ -2668,15 +2922,21 @@
             const instr = inp.value.trim();
             if (!instr) return;
             const btn = document.getElementById("btnRefinePlaylist");
+            const vaEl = document.getElementById("studioVerifyAudio");
             btn.disabled = true;
             try {
-                const res = await apiJson("/api/studio/refine", {
+                const res = await apiJson("/api/studio/chat", {
                     method: "POST",
-                    body: { instruction: instr, fast: document.getElementById("studioFastMode").checked },
+                    body: {
+                        message: instr,
+                        fast: document.getElementById("studioFastMode").checked,
+                        verify_audio: vaEl ? vaEl.checked : null,
+                    },
                 });
                 inp.value = "";
                 renderPlaylistResult(res.playlist);
-                showToast(`Refined playlist (${(res.playlist?.tracks || []).length} tracks).`, "ok");
+                renderStudioChatState(res.history || [], res.locked_ids || []);
+                showToast(res.assistant_reply || `Updated playlist (${(res.playlist?.tracks || []).length} tracks).`, "ok");
             } catch (err) {
                 showToast(err.message, "err");
             } finally {
@@ -2693,6 +2953,26 @@
 
         const studioBody = document.getElementById("studioTracksBody");
         studioBody.addEventListener("click", async (e) => {
+            const lockBtn = e.target.closest(".track-lock-btn");
+            if (lockBtn) {
+                const trackId = lockBtn.dataset.trackId;
+                const nextLocked = lockBtn.dataset.locked !== "1";
+                if (!trackId) return;
+                lockBtn.disabled = true;
+                try {
+                    const res = await apiJson("/api/studio/lock", {
+                        method: "POST",
+                        body: { track_id: trackId, locked: nextLocked },
+                    });
+                    renderPlaylistResult(res.playlist);
+                } catch (err) {
+                    showToast(err.message, "err");
+                } finally {
+                    lockBtn.disabled = false;
+                }
+                return;
+            }
+
             const prevBtn = e.target.closest(".preview-btn");
             if (prevBtn) {
                 openPreviewTrack(
@@ -3179,21 +3459,74 @@
                 showToast(err.message, "err");
             }
         });
+        document.getElementById("cloudModelChips")?.addEventListener("click", (e) => {
+            const chip = e.target.closest(".cloud-model-pick-btn");
+            if (!chip) return;
+            const cModelEl = document.getElementById("prefCloudModel");
+            if (cModelEl) cModelEl.value = chip.dataset.model || "";
+        });
+        document.getElementById("btnTestLlm")?.addEventListener("click", async () => {
+            const backend = document.getElementById("prefLlmBackend").value;
+            const cloudModel = document.getElementById("prefCloudModel")?.value.trim() || "";
+            const apiKey = document.getElementById("prefCloudApiKey")?.value.trim() || "";
+            const statusEl = document.getElementById("llmTestStatus");
+            const btn = document.getElementById("btnTestLlm");
+            if (statusEl) statusEl.textContent = "Testing connection...";
+            if (btn) btn.disabled = true;
+            try {
+                const res = await apiJson("/api/llm/test", {
+                    method: "POST",
+                    body: {
+                        backend,
+                        cloud_model: cloudModel,
+                        api_key: apiKey,
+                        ollama_url: document.getElementById("prefOllamaUrl")?.value.trim(),
+                        ollama_model: document.getElementById("prefOllamaModel")?.value.trim(),
+                    },
+                });
+                if (res.ok) {
+                    const msg = `Connected to ${res.model || backend} (${res.capability_tier || "standard"}, ${res.latency_ms} ms)`;
+                    if (statusEl) statusEl.textContent = msg;
+                    showToast(msg, "ok");
+                } else {
+                    const msg = res.error || "Connection test failed";
+                    if (statusEl) statusEl.textContent = msg;
+                    showToast(msg, "err");
+                }
+            } catch (err) {
+                if (statusEl) statusEl.textContent = err.message;
+                showToast(err.message, "err");
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        });
         document.getElementById("btnSaveLlmConfig").addEventListener("click", async () => {
             try {
+                const backend = document.getElementById("prefLlmBackend").value;
+                const cloudModel = document.getElementById("prefCloudModel")?.value.trim() || "";
+                const apiKeyVal = document.getElementById("prefCloudApiKey")?.value.trim() || "";
+                const criticDepth = document.getElementById("prefCriticDepth")?.value || "auto";
                 const payload = {
                     preferences: {
-                        llm_backend: document.getElementById("prefLlmBackend").value,
+                        llm_backend: backend,
                         llm_model_key: state.selectedLlmModelKey || "auto",
                         llm_device: document.getElementById("prefLlmDevice").value,
                         ollama_url: document.getElementById("prefOllamaUrl").value.trim(),
                         ollama_model: document.getElementById("prefOllamaModel").value.trim(),
+                        cloud_model: cloudModel,
+                        critic_depth: criticDepth,
                     },
                 };
+                if (["gemini", "openai", "anthropic", "openrouter"].includes(backend) && apiKeyVal) {
+                    payload.llm_api_keys = { [backend]: apiKeyVal };
+                }
                 await apiJson("/api/preferences", { method: "POST", body: payload });
+                if (document.getElementById("prefCloudApiKey")) {
+                    document.getElementById("prefCloudApiKey").value = "";
+                }
                 await loadLlmCatalog();
                 await refreshStatus();
-                showToast("Saved Local AI Model & Hardware Tier settings!", "ok");
+                showToast("Saved model and backend settings.", "ok");
             } catch (err) {
                 showToast(err.message, "err");
             }
@@ -3325,6 +3658,8 @@
         document.getElementById("studioSize").value = String(defSize);
         document.getElementById("studioSizeVal").textContent = String(defSize);
         document.getElementById("studioFastMode").checked = Boolean(p.default_fast_mode);
+        const vaEl = document.getElementById("studioVerifyAudio");
+        if (vaEl) vaEl.checked = !Boolean(p.default_fast_mode);
         document.getElementById("chkExportPublic").checked = Boolean(p.default_public_export);
         if (p.active_provider) {
             state.activeProvider = p.active_provider;

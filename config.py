@@ -158,6 +158,53 @@ DEFAULT_ACTIVE_PROVIDER = "spotify"
 # =======================================================
 USER_PREFS_FILE = os.path.join(BASE_DIR, "user_preferences.json")
 USER_FEEDBACK_FILE = os.path.join(BASE_DIR, "user_feedback.json")
+LLM_KEYS_FILE = os.path.join(BASE_DIR, ".llm_keys.json")
+
+# =======================================================
+# CLOUD LLM PROVIDER CATALOG (Optional BYO API Keys)
+# =======================================================
+CLOUD_LLM_PROVIDERS = {
+    "gemini": {
+        "label": "Google Gemini",
+        "env_var": "GEMINI_API_KEY",
+        "default_model": "gemini-2.5-flash",
+        "models": [
+            {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "tier": "standard"},
+            {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro", "tier": "frontier"},
+            {"id": "gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash-Lite", "tier": "compact"},
+        ],
+    },
+    "openai": {
+        "label": "OpenAI",
+        "env_var": "OPENAI_API_KEY",
+        "default_model": "gpt-4o-mini",
+        "models": [
+            {"id": "gpt-4o-mini", "label": "GPT-4o mini", "tier": "standard"},
+            {"id": "gpt-4.1-mini", "label": "GPT-4.1 mini", "tier": "standard"},
+            {"id": "gpt-4.1", "label": "GPT-4.1", "tier": "frontier"},
+        ],
+    },
+    "anthropic": {
+        "label": "Anthropic Claude",
+        "env_var": "ANTHROPIC_API_KEY",
+        "default_model": "claude-3-5-haiku-latest",
+        "models": [
+            {"id": "claude-3-5-haiku-latest", "label": "Claude 3.5 Haiku", "tier": "standard"},
+            {"id": "claude-sonnet-4-20250514", "label": "Claude Sonnet 4", "tier": "frontier"},
+        ],
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "env_var": "OPENROUTER_API_KEY",
+        "default_model": "google/gemini-2.5-flash",
+        "models": [
+            {"id": "google/gemini-2.5-flash", "label": "Gemini 2.5 Flash (OR)", "tier": "standard"},
+            {"id": "openai/gpt-4o-mini", "label": "GPT-4o mini (OR)", "tier": "standard"},
+            {"id": "anthropic/claude-sonnet-4", "label": "Claude Sonnet 4 (OR)", "tier": "frontier"},
+            {"id": "qwen/qwen3-32b", "label": "Qwen3 32B (OR)", "tier": "standard"},
+        ],
+    },
+}
 MAX_LIKED_SONGS = 500
 RECCOBEATS_BATCH_SIZE = 40
 RECCOBEATS_NOT_FOUND_TTL_DAYS = 14

@@ -259,7 +259,43 @@
                                     <option value="shuffle">Artist-spaced shuffle</option>
                                 </select>
                             </div>
+                            <div class="field-group">
+                                <label for="studioKnownRatio">Library blend (<span id="studioKnownRatioVal">Auto (30%)</span>)</label>
+                                <div class="slider-auto-row">
+                                    <input id="studioKnownRatio" type="range" min="0" max="100" value="30" disabled />
+                                    <label class="checkbox-row compact-check">
+                                        <input type="checkbox" id="studioKnownRatioAuto" checked />
+                                        <span>Auto</span>
+                                    </label>
+                                </div>
+                            </div>
                         </div>
+
+                        <details class="fine-tune-drawer mt-12">
+                            <summary>Fine-tune retrieval &amp; critic</summary>
+                            <div class="studio-controls-grid mt-12">
+                                <div class="field-group">
+                                    <label for="studioTasteWeight">Taste anchor (<span id="studioTasteWeightVal">Auto</span>)</label>
+                                    <div class="slider-auto-row">
+                                        <input id="studioTasteWeight" type="range" min="0" max="100" value="30" disabled />
+                                        <label class="checkbox-row compact-check">
+                                            <input type="checkbox" id="studioTasteWeightAuto" checked />
+                                            <span>Auto</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="field-group">
+                                    <label for="studioCriticDepth">Critic review depth</label>
+                                    <select id="studioCriticDepth">
+                                        <option value="auto">Auto (model tier)</option>
+                                        <option value="0">Off (0 passes)</option>
+                                        <option value="1">Light (1 pass)</option>
+                                        <option value="2">Standard (2 passes)</option>
+                                        <option value="3">Deep (3 passes)</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </details>
 
                         <div class="toggles-row mt-16">
                             <label class="checkbox-row">
@@ -278,6 +314,10 @@
                                 <input type="checkbox" id="studioDeepCuts" />
                                 <span>Deep cuts (pop 15–58)</span>
                             </label>
+                            <label class="checkbox-row" title="Score top discovery finalists using real 30s audio previews when CLAP vectors are active">
+                                <input type="checkbox" id="studioVerifyAudio" checked />
+                                <span>Verify audio (CLAP)</span>
+                            </label>
                         </div>
 
                         <div class="session-strip mt-16">
@@ -289,6 +329,27 @@
                         <div class="btn-row mt-16">
                             <button class="btn btn-primary" id="btnGeneratePlaylist" type="button">Generate playlist</button>
                             <button class="btn" id="btnContinuePlaying" type="button" title="Seed mix from currently playing Spotify track">Continue playing now</button>
+                        </div>
+
+                        <div id="studioProgressPanel" class="studio-progress-panel mt-16" style="display:none;">
+                            <div class="progress-panel-head">
+                                <div class="progress-steps" id="studioProgressSteps">
+                                    <span class="progress-step" data-step="1">Plan</span>
+                                    <span class="progress-step" data-step="2">Library</span>
+                                    <span class="progress-step" data-step="3">Discover</span>
+                                    <span class="progress-step" data-step="4">Critic</span>
+                                    <span class="progress-step" data-step="5">Curate</span>
+                                </div>
+                                <div class="btn-row" style="gap:8px; align-items:center;">
+                                    <span id="studioProgressPct" class="progress-pct">0%</span>
+                                    <button class="btn btn-xs btn-danger" id="btnCancelGenerate" type="button">Cancel</button>
+                                </div>
+                            </div>
+                            <div class="progress-bar-track mt-8">
+                                <div id="studioProgressBar" class="progress-bar-fill" style="width:0%;"></div>
+                            </div>
+                            <div id="studioProgressDetail" class="muted mt-8">Preparing request</div>
+                        </div>
                         </div>
                     </div>
 
@@ -398,10 +459,18 @@
                     </div>
 
                     <div id="transferReportBanner" class="compat-banner mt-12" style="display:none;"></div>
+                    <div id="resDjNotes" class="dj-notes-bar mt-12" style="display:none;"></div>
 
-                    <div class="refine-bar mt-16">
-                        <input id="refineInput" type="text" placeholder="Refine playlist (e.g. faster tempo, remove artist, more synth)" />
-                        <button class="btn btn-sm" id="btnRefinePlaylist" type="button">Refine</button>
+                    <div class="dj-chat-drawer mt-16">
+                        <div class="dj-chat-head">
+                            <span class="muted">DJ collaborator</span>
+                            <span id="studioLockedSummary" class="badge badge-info">0 locked</span>
+                        </div>
+                        <div id="studioChatThread" class="chat-thread mt-8" style="display:none;"></div>
+                        <div class="refine-bar mt-8">
+                            <input id="refineInput" type="text" placeholder="Ask DJ to tweak mix (e.g. drop #3, more synthwave, lock favorites)" />
+                            <button class="btn btn-sm" id="btnRefinePlaylist" type="button">Send</button>
+                        </div>
                     </div>
 
                     <div class="table-wrap mt-16">
@@ -751,6 +820,10 @@
                                 <option value="openvino">OpenVINO GenAI (built-in CPU / Intel iGPU)</option>
                                 <option value="ollama">Local Ollama server (NVIDIA CUDA)</option>
                                 <option value="openai_local">OpenAI-compatible endpoint (LM Studio / llama.cpp)</option>
+                                <option value="gemini">Google Gemini (Cloud API key)</option>
+                                <option value="openai">OpenAI (Cloud API key)</option>
+                                <option value="anthropic">Anthropic Claude (Cloud API key)</option>
+                                <option value="openrouter">OpenRouter (Cloud API key)</option>
                             </select>
                         </div>
                         <div class="field-group">
@@ -784,6 +857,41 @@
                         </div>
                         <div id="ollamaTierChips" class="preset-row mt-12"></div>
                         <div id="ollamaDetectedModels" class="muted mt-8"></div>
+                    </div>
+
+                    <div id="cloudLlmConfigBox" class="cloud-box mt-16" style="display:none;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                            <div>
+                                <h3 id="cloudProviderTitle">Cloud API provider</h3>
+                                <p class="muted">Keys are stored locally in <code>.llm_keys.json</code> or read from environment variables.</p>
+                            </div>
+                            <button class="btn btn-sm" id="btnTestLlm" type="button">Test connection</button>
+                        </div>
+                        <div class="two-col mt-12">
+                            <div class="field-group">
+                                <label for="prefCloudModel">Model ID</label>
+                                <input id="prefCloudModel" type="text" placeholder="Provider default model" />
+                            </div>
+                            <div class="field-group">
+                                <label for="prefCloudApiKey">API key (<span id="prefCloudKeyMask">Not set</span>)</label>
+                                <input id="prefCloudApiKey" type="password" autocomplete="off" placeholder="Paste API key to update or leave blank" />
+                            </div>
+                        </div>
+                        <div id="cloudModelChips" class="preset-row mt-12"></div>
+                        <div id="llmTestStatus" class="muted mt-8"></div>
+                    </div>
+
+                    <div class="two-col mt-16">
+                        <div class="field-group">
+                            <label for="prefCriticDepth">Default agentic critic depth</label>
+                            <select id="prefCriticDepth">
+                                <option value="auto">Auto (scales by model capability)</option>
+                                <option value="0">Off (0 passes)</option>
+                                <option value="1">Light (1 pass)</option>
+                                <option value="2">Standard (2 passes)</option>
+                                <option value="3">Deep (3 passes)</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
 

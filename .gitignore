@@ -25,6 +25,7 @@ Thumbs.db
 .env.*
 !.env.example
 .spotify_client_id
+.llm_keys.json
 .cache
 .cache/
 01_Data_Extractor/.cache

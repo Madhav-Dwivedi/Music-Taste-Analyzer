@@ -676,6 +676,8 @@ def get_effective_preferences():
         "llm_device": "auto",
         "ollama_url": getattr(config, "DEFAULT_OLLAMA_URL", "http://127.0.0.1:11434"),
         "ollama_model": getattr(config, "DEFAULT_OLLAMA_MODEL", "qwen3:8b"),
+        "cloud_model": "",
+        "critic_depth": "auto",
         "cluster_labels": {},
         "presets": _sanitize_presets(None),
         "automation": dict(DEFAULT_AUTOMATION_SETTINGS),
@@ -721,7 +723,8 @@ def _apply_preference_updates(prefs, raw):
         prefs["playlist_cooccurrence_weight"] = _clamp_pref_float(
             raw.get("playlist_cooccurrence_weight"), 0.0, 0.35, prefs["playlist_cooccurrence_weight"]
         )
-    if str(raw.get("llm_backend") or "").strip().lower() in ("openvino", "ollama", "openai_local"):
+    valid_backends = ("openvino", "ollama", "openai_local", "gemini", "openai", "anthropic", "openrouter")
+    if str(raw.get("llm_backend") or "").strip().lower() in valid_backends:
         prefs["llm_backend"] = str(raw["llm_backend"]).strip().lower()
     mkey = str(raw.get("llm_model_key") or "").strip()
     if mkey in _valid_llm_model_keys():
@@ -736,6 +739,12 @@ def _apply_preference_updates(prefs, raw):
     omodel = str(raw.get("ollama_model") or "").strip()[:120]
     if omodel:
         prefs["ollama_model"] = omodel
+    if "cloud_model" in raw:
+        prefs["cloud_model"] = str(raw.get("cloud_model") or "").strip()[:120]
+    if "critic_depth" in raw:
+        cdepth = str(raw.get("critic_depth") or "").strip().lower()
+        if cdepth in ("auto", "0", "1", "2", "3"):
+            prefs["critic_depth"] = cdepth
     if isinstance(raw.get("cluster_labels"), dict):
         prefs["cluster_labels"] = {
             str(k): str(v).strip()[:80]
@@ -755,6 +764,92 @@ def save_user_preferences(updates):
     prefs_path = getattr(config, "USER_PREFS_FILE", os.path.join(config.BASE_DIR, "user_preferences.json"))
     atomic_write_json(prefs_path, current, indent=2)
     return current
+
+
+def _cloud_provider_ids():
+    providers = getattr(config, "CLOUD_LLM_PROVIDERS", {}) or {}
+    return tuple(providers.keys()) or ("gemini", "openai", "anthropic", "openrouter")
+
+
+def load_llm_api_keys():
+    """Load optional cloud LLM API keys from local gitignored .llm_keys.json."""
+    keys_path = getattr(config, "LLM_KEYS_FILE", os.path.join(config.BASE_DIR, ".llm_keys.json"))
+    raw = load_json_safe(keys_path)
+    if not isinstance(raw, dict):
+        return {}
+    allowed = set(_cloud_provider_ids())
+    out = {}
+    for k, v in raw.items():
+        pk = str(k or "").strip().lower()
+        if pk in allowed and isinstance(v, str) and v.strip():
+            out[pk] = v.strip()
+    return out
+
+
+def save_llm_api_keys(updates):
+    """Merge and atomically persist cloud LLM API keys to .llm_keys.json."""
+    if not isinstance(updates, dict):
+        return load_llm_api_keys()
+    current = load_llm_api_keys()
+    allowed = set(_cloud_provider_ids())
+    for raw_k, raw_v in updates.items():
+        pk = str(raw_k or "").strip().lower()
+        if pk not in allowed:
+            continue
+        if raw_v is None:
+            continue
+        val = str(raw_v).strip()
+        if not val:
+            current.pop(pk, None)
+        elif "..." not in val and val.lower() != "set":
+            current[pk] = val[:512]
+    keys_path = getattr(config, "LLM_KEYS_FILE", os.path.join(config.BASE_DIR, ".llm_keys.json"))
+    atomic_write_json(keys_path, current, indent=2)
+    try:
+        os.chmod(keys_path, 0o600)
+    except OSError:
+        pass
+    return current
+
+
+def get_llm_api_key(provider):
+    """Return configured API key for a cloud provider from .llm_keys.json or environment."""
+    pk = str(provider or "").strip().lower()
+    stored = load_llm_api_keys().get(pk, "")
+    if stored:
+        return stored
+    providers = getattr(config, "CLOUD_LLM_PROVIDERS", {}) or {}
+    env_var = str((providers.get(pk) or {}).get("env_var") or "").strip()
+    if env_var:
+        return str(os.environ.get(env_var, "") or "").strip()
+    return ""
+
+
+def _mask_secret(val):
+    if not val:
+        return ""
+    if len(val) > 8:
+        return f"{val[:4]}...{val[-4:]}"
+    return "Set"
+
+
+def get_masked_llm_keys():
+    """Return non-secret masked status for every supported cloud LLM provider."""
+    stored = load_llm_api_keys()
+    providers = getattr(config, "CLOUD_LLM_PROVIDERS", {}) or {}
+    out = {}
+    for pk in _cloud_provider_ids():
+        s_val = stored.get(pk, "")
+        env_var = str((providers.get(pk) or {}).get("env_var") or "").strip()
+        e_val = str(os.environ.get(env_var, "") or "").strip() if env_var else ""
+        active_val = s_val or e_val
+        source = "file" if s_val else ("env" if e_val else "")
+        out[pk] = {
+            "has_key": bool(active_val),
+            "masked": _mask_secret(active_val),
+            "source": source,
+        }
+    return out
 
 
 def _extract_artist_names_lower(artists_value):
